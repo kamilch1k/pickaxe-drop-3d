@@ -4,6 +4,7 @@ import type { PhysicsWorld, OwnerKind } from '../physics/PhysicsWorld';
 import type { Target } from '../destruction/Target';
 import { TOOL_BY_ID, type ToolDef } from '../content/tools';
 import { buildTool, type BuiltTool } from './ToolFactory';
+import type { DamageResult } from '../destruction/VoxelGrid';
 import type { FxManager } from '../effects/FxManager';
 import type { DebrisSystem } from './DebrisSystem';
 import type { CameraDirector } from '../scene/CameraDirector';
@@ -387,7 +388,10 @@ export class DropSystem {
       return;
     }
 
-    this.applyImpact(drop, drop.impactPos, radius, drop.def.damage * quality, false);
+    const res = this.applyImpact(drop, drop.impactPos, radius, drop.def.damage * quality, false);
+    if (drop.def.kind === 'pickaxe' && res && res.destroyed.length > 0) {
+      this.hopUp(drop);
+    }
 
     if (drop.def.behavior === 'drill' || drop.def.behavior === 'saw') {
       drop.state = 'channel';
@@ -427,9 +431,9 @@ export class DropSystem {
     radius: number,
     damage: number,
     crit: boolean,
-  ): void {
+  ): DamageResult | null {
     const target = this.ctx.getTarget();
-    if (!target) return;
+    if (!target) return null;
     const prog = this.ctx.progression;
     const finalRadius = radius * (crit ? 1.4 : 1);
     const finalDamage = damage * prog.damageMul * (crit ? 2.1 : 1);
@@ -476,6 +480,21 @@ export class DropSystem {
       crit,
       tool: drop.def,
     });
+    return res;
+  }
+
+  /**
+   * A clean little hop after a pickaxe bites a block, so every successful hit
+   * reads as a bounce instead of the tool just stopping dead in the crater.
+   */
+  private hopUp(drop: ActiveDrop): void {
+    const v = drop.body.linvel();
+    // Guarantee at least a small upward hop without stacking on top of a hard
+    // restitution bounce (a heavy hit already rebounds on its own).
+    const hop = 2.4 + rand(0, 1.2);
+    drop.body.setLinvel({ x: v.x, y: Math.max(v.y, hop), z: 0 }, true);
+    const w = drop.body.angvel();
+    drop.body.setAngvel({ x: w.x, y: w.y, z: w.z + rand(-1.2, 1.2) }, true);
   }
 
   /**
