@@ -4,6 +4,8 @@ A polished 3D physics destruction toy: you drop increasingly ridiculous heavy
 objects from the sky onto voxel targets and watch them come apart block by
 block.
 
+**Play it now: https://kamilch1k.github.io/pickaxe-drop-3d/**
+
 Everything runs in the browser. No backend, no build-time assets — every
 texture, sound and model in the game is generated procedurally at runtime.
 
@@ -93,6 +95,18 @@ Instanced voxels, pooled debris/particles/shards, a single shadow-casting light,
 throttled collider rebuilds and connectivity checks, capped rigid bodies, and an
 adaptive quality step that lowers the pixel ratio and disables bloom if the
 frame budget is repeatedly blown.
+
+## Deployment
+
+The playable build lives on the `gh-pages` branch: it contains the contents of
+`dist/` plus a `.nojekyll` file, and GitHub Pages serves it at
+https://kamilch1k.github.io/pickaxe-drop-3d/.
+
+```bash
+npm run build
+# then publish dist/ to the gh-pages branch (any static host works too,
+# the bundle uses relative asset paths so it runs from a sub-path)
+```
 
 ## QA scripts (optional)
 
