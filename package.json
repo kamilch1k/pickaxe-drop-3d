@@ -1,0 +1,22 @@
+{
+  "name": "pickaxe-drop-3d",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "PICKAXE DROP 3D - a physics destruction toy where you rain increasingly ridiculous objects onto voxel targets.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.14.0",
+    "three": "^0.169.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.169.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}
