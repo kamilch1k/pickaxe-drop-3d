@@ -167,6 +167,7 @@ export class Game {
               colliders: this.physics.world.colliders.len(),
               bodies: this.physics.world.bodies.len(),
               voxels: this.target?.remaining ?? 0,
+              enabledBodies: this.physics.enabledBodyCount(),
             },
           };
         },
@@ -203,6 +204,11 @@ export class Game {
           return { x: s.x, y: s.y };
         },
         dropInfo: () => this.drops.snapshot(),
+        enabledBodies: () => this.physics.enabledBodyCount(),
+        cameraInfo: () => {
+          const d = this.rig.director.camera.getWorldDirection(new THREE.Vector3());
+          return { x: Number(d.x.toFixed(3)), y: Number(d.y.toFixed(3)), z: Number(d.z.toFixed(3)) };
+        },
         colliderInfo: () => {
           const t = this.target;
           if (!t) return null;
@@ -273,6 +279,8 @@ export class Game {
     ascii(axis?: 'front' | 'side'): string;
     aimRandom(): { x: number; y: number } | null;
     dropInfo(): unknown;
+    cameraInfo(): { x: number; y: number; z: number };
+    enabledBodies(): number;
     colliderInfo(): unknown;
   } | null = null;
 

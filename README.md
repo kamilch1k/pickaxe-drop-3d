@@ -21,10 +21,17 @@ npm run preview    # serve the production build
 
 ## Mining feel
 
-Pickaxes are sized to the blocks, fall straight, and flip in a plane facing the
-camera — they never tip onto their side. A strike carves exactly the block it
-hit (and a growing cluster as you unlock better tools), so the crater grows
-where you aim instead of where the physics engine happened to shove a sphere.
+Pickaxes are sized to the blocks and dropped **dead vertical** — no lateral
+spread, no sideways shove. Each one is locked to a single rotation axis: it
+spins only in a plane facing the camera around its own Z axis, and X/Y rotation
+is overwritten every frame from both the rotation and the angular velocity, so a
+pickaxe can never tip onto its side or start tumbling around world Z after it
+lands. The tool geometry is built around its own centre of mass, which is what
+makes that constraint free of drift. Drills and saws spin on their own axis;
+anvils, bombs, boulders and meteors keep full rigid-body rotation.
+
+A strike carves exactly the block it hit (and a growing cluster as you unlock
+better tools), so the crater grows where you aim.
 
 ## How to play
 

@@ -66,6 +66,15 @@ export class PhysicsWorld {
     });
   }
 
+  /** Number of rigid-bodies currently participating in the simulation. */
+  enabledBodyCount(): number {
+    let n = 0;
+    this.world.bodies.forEach((b) => {
+      if (b.isEnabled()) n++;
+    });
+    return n;
+  }
+
   removeBody(body: RAPIER.RigidBody | null | undefined): void {
     if (!body) return;
     for (let i = 0; i < body.numColliders(); i++) {

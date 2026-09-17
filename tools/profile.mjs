@@ -51,6 +51,10 @@ await sleep(7000);
 await page.evaluate(() => window.__game.dev.profile(true));
 await sleep(3000);
 await report('idle, beast loaded');
+const probe = await page.evaluate(() => ({
+  enabled: window.__game.dev.enabledBodies(),
+}));
+console.log('  enabled bodies:', JSON.stringify(probe));
 
 // heavy: spam meteors + rain, wiggling the pointer to exercise the aim path
 await page.evaluate(() => {

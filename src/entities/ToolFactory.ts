@@ -71,6 +71,7 @@ function toolMat(key: ToolMaterialKey): THREE.MeshStandardMaterial {
 function toolGeometries(
   def: ToolDef,
   scale: number,
+  com: THREE.Vector3,
 ): { mat: ToolMaterialKey; geo: THREE.BufferGeometry }[] {
   const key = `${def.id}|${scale.toFixed(3)}`;
   const cached = toolGeoCache.get(key);
@@ -101,7 +102,7 @@ function toolGeometries(
     }
     e.set(p.rot?.[0] ?? 0, p.rot?.[1] ?? 0, p.rot?.[2] ?? 0);
     q.setFromEuler(e);
-    pos.set(p.pos[0] * scale, p.pos[1] * scale, p.pos[2] * scale);
+    pos.set(p.pos[0] * scale - com.x, p.pos[1] * scale - com.y, p.pos[2] * scale - com.z);
     m4.compose(pos, q, one);
     // mergeGeometries needs a consistent index state across inputs: some of
     // three's primitives are indexed and others are not.
@@ -125,10 +126,46 @@ function toolGeometries(
 const _euler = new THREE.Euler();
 const _quat = new THREE.Quaternion();
 
+/** Volume of a part in cubic world units. */
+function partVolume(p: { kind: string; size: number[] }, scale: number): number {
+  const sx = p.size[0] * scale;
+  const sy = (p.size[1] ?? 0) * scale;
+  const sz = (p.size[2] ?? 0) * scale;
+  if (p.kind === 'box') return sx * sy * sz;
+  if (p.kind === 'cyl') return Math.PI * sx * sx * sy;
+  if (p.kind === 'cone') return (Math.PI * sx * sx * sy) / 3;
+  return (4 / 3) * Math.PI * sx ** 3;
+}
+
+/**
+ * Centre of mass of the compound in authored part space. All parts are then
+ * shifted by `-com`, so the body's origin *is* its centre of mass: Rapier's
+ * rotation (about the COM) and our constrained rotation (about the origin)
+ * become the same transform and a spinning tool falls perfectly straight
+ * instead of orbiting its own head.
+ */
+export function toolCentreOfMass(def: ToolDef, scale: number): THREE.Vector3 {
+  let mx = 0;
+  let my = 0;
+  let mz = 0;
+  let m = 0;
+  for (const p of def.parts) {
+    if (p.decor) continue;
+    const w = partVolume(p, scale) * p.density;
+    mx += p.pos[0] * scale * w;
+    my += p.pos[1] * scale * w;
+    mz += p.pos[2] * scale * w;
+    m += w;
+  }
+  if (m <= 0) return new THREE.Vector3();
+  return new THREE.Vector3(mx / m, my / m, mz / m);
+}
+
 export function buildTool(def: ToolDef, RAPIER_NS: typeof RAPIER, scaleOverride?: number): BuiltTool {
   const scale = scaleOverride ?? def.scale ?? 1;
+  const com = toolCentreOfMass(def, scale);
   const group = new THREE.Group();
-  for (const { mat, geo } of toolGeometries(def, scale)) {
+  for (const { mat, geo } of toolGeometries(def, scale, com)) {
     const mesh = new THREE.Mesh(geo, toolMat(mat));
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -147,15 +184,11 @@ export function buildTool(def: ToolDef, RAPIER_NS: typeof RAPIER, scaleOverride?
     const sx = p.size[0] * scale;
     const sy = (p.size[1] ?? 0) * scale;
     const sz = (p.size[2] ?? 0) * scale;
-    let vol = 1;
-    if (p.kind === 'box') vol = sx * sy * sz;
-    else if (p.kind === 'cyl') vol = Math.PI * sx * sx * sy;
-    else if (p.kind === 'cone') vol = (Math.PI * sx * sx * sy) / 3;
-    else vol = (4 / 3) * Math.PI * sx ** 3;
+    const vol = partVolume(p, scale);
 
-    const px = p.pos[0] * scale;
-    const py = p.pos[1] * scale;
-    const pz = p.pos[2] * scale;
+    const px = p.pos[0] * scale - com.x;
+    const py = p.pos[1] * scale - com.y;
+    const pz = p.pos[2] * scale - com.z;
     const partMass = vol * p.density;
     mass += p.decor ? 0 : partMass;
     const dist = Math.hypot(px, py, pz) + Math.max(sx, sy, sz) * 0.6;
@@ -183,10 +216,10 @@ export function buildTool(def: ToolDef, RAPIER_NS: typeof RAPIER, scaleOverride?
     desc
       .setTranslation(px, py, pz)
       .setRotation({ x: _quat.x, y: _quat.y, z: _quat.z, w: _quat.w })
-      .setDensity(p.density)
       .setFriction(def.friction)
       .setRestitution(def.restitution)
       .setActiveEvents(RAPIER_NS.ActiveEvents.COLLISION_EVENTS);
+    desc.setDensity(p.density);
     colliders.push(desc);
   }
 

@@ -211,15 +211,18 @@ export class DropSystem {
     built.group.quaternion.copy(q);
     scene.add(built.group);
 
-    const body = physics.world.createRigidBody(
-      physics.RAPIER.RigidBodyDesc.dynamic()
-        .setTranslation(x, y, z)
-        .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w })
-        .setLinearDamping(def.linearDamping)
-        .setAngularDamping(def.angularDamping)
-        .setGravityScale(def.gravityScale)
-        .setCcdEnabled(def.ccd === true),
-    );
+    const bodyDesc = physics.RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(x, y, z)
+      .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w })
+      .setLinearDamping(def.linearDamping)
+      .setAngularDamping(def.angularDamping)
+      .setGravityScale(def.gravityScale)
+      .setCcdEnabled(def.ccd === true);
+    // NOTE: Rapier's `enabledRotations` lock works on WORLD axes, which would
+    // let a pickaxe start spinning around world Z once it touches something.
+    // The constrained spin is therefore enforced in update() instead, where we
+    // own both the rotation and the angular velocity of the body.
+    const body = physics.world.createRigidBody(bodyDesc);
 
     const tip = built.tip.clone().applyQuaternion(q).add(built.group.position);
     const spinVel = def.spin * rand(0.75, 1.25) * (rand(0, 1) < 0.5 ? 1 : -1);
@@ -271,7 +274,8 @@ export class DropSystem {
         true,
       );
     }
-    body.setLinvel({ x: rand(-0.7, 0.7), y: -2.5, z: rand(-0.7, 0.7) }, true);
+    // Drop dead vertical: no lateral drift, no initial sideways shove.
+    body.setLinvel({ x: 0, y: -2.5, z: 0 }, true);
 
     this.drops.push(drop);
     this.ctx.audio.whoosh(def.kind === 'projectile' ? 1.4 : 1);
@@ -602,9 +606,13 @@ export class DropSystem {
       drop.prevTipWorld.copy(drop.tipWorld);
 
       // Constrained tools: the spin angle is authoritative, so the pickaxe
-      // always flips in its own plane and can never roll onto its side.
+      // always flips in its own plane and can never roll onto its side. Both
+      // the rotation and the angular velocity are overwritten every frame, so
+      // contact impulses can't introduce off-axis spin. (Tool geometry is built
+      // around its own centre of mass, so this rotation is COM-preserving and
+      // the tool falls dead straight.)
       if (drop.def.spinMode !== 'free' && drop.state !== 'done') {
-        const damp = drop.def.spinMode === 'planar' ? 0.12 : 0.02;
+        const damp = drop.hasHit ? 3.2 : drop.def.spinMode === 'planar' ? 0.12 : 0.02;
         drop.spinVel *= Math.max(0, 1 - damp * dt);
         drop.spinAngle += drop.spinVel * dt;
         QUAT.setFromAxisAngle(drop.spinAxis, drop.spinAngle).multiply(drop.spinBase);
@@ -713,14 +721,23 @@ export class DropSystem {
     return this.drops.map((d) => {
       const t = d.body.translation();
       const v = d.body.linvel();
+      const w = d.body.angvel();
+      const r = d.body.rotation();
       return {
         tool: d.def.id,
         state: d.state,
         stuck: d.stuck,
         hasHit: d.hasHit,
+        rot: [Number(r.x.toFixed(3)), Number(r.y.toFixed(3)), Number(r.z.toFixed(3)), Number(r.w.toFixed(3))],
+        angvel: [Number(w.x.toFixed(3)), Number(w.y.toFixed(3)), Number(w.z.toFixed(3))],
         sleep: d.body.isSleeping(),
+        x: Number(t.x.toFixed(3)),
+        z: Number(t.z.toFixed(3)),
         y: Number(t.y.toFixed(2)),
         vy: Number(v.y.toFixed(2)),
+        vx: Number(v.x.toFixed(3)),
+        vz: Number(v.z.toFixed(3)),
+        com: [Number(d.body.localCom().x.toFixed(4)), Number(d.body.localCom().y.toFixed(4)), Number(d.body.localCom().z.toFixed(4))],
         speed: Number(Math.hypot(v.x, v.y, v.z).toFixed(2)),
       };
     });
