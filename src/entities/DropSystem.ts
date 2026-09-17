@@ -402,7 +402,13 @@ export class DropSystem {
     TMP.set(t.x, t.y, t.z);
     const physR = drop.def.bodyRadius ?? 1.6;
     const dps = drop.def.channelDps ?? 140;
-    const res = target.damage(TMP, drop.radius, dps * 0.09, 300, physR * 0.95);
+    const res = target.damage(
+      TMP,
+      drop.radius,
+      dps * 0.075 * this.ctx.progression.damageMul,
+      300,
+      physR * 0.88,
+    );
     this.keepRolling(drop);
     if (!res.destroyed.length) {
       if (Math.random() < 0.25) {
@@ -539,12 +545,12 @@ export class DropSystem {
         drop.channelTick -= dt;
         if (drop.channelTick <= 0 && target) {
           if (drop.def.behavior === 'roll') {
-            drop.channelTick = 0.09;
+            drop.channelTick = 0.075;
             this.rollChew(drop, target);
           } else {
             drop.channelTick = 0.18;
           const dps = drop.def.channelDps ?? 40;
-          const dmg = dps * 0.18;
+          const dmg = dps * 0.18 * this.ctx.progression.damageMul;
           target.snapToSurface(drop.tipWorld, 4);
           const res = target.damage(drop.tipWorld, drop.radius * 0.6, dmg, 260);
           if (res.destroyed.length) {
@@ -613,6 +619,24 @@ export class DropSystem {
 
   get activeCount(): number {
     return this.drops.length;
+  }
+
+  /** Debug snapshot of live drops (dev harness only). */
+  snapshot(): unknown {
+    return this.drops.map((d) => {
+      const t = d.body.translation();
+      const v = d.body.linvel();
+      return {
+        tool: d.def.id,
+        state: d.state,
+        stuck: d.stuck,
+        hasHit: d.hasHit,
+        sleep: d.body.isSleeping(),
+        y: Number(t.y.toFixed(2)),
+        vy: Number(v.y.toFixed(2)),
+        speed: Number(Math.hypot(v.x, v.y, v.z).toFixed(2)),
+      };
+    });
   }
 
   createPreview(def: ToolDef): BuiltTool {

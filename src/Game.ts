@@ -172,6 +172,20 @@ export class Game {
           }
           return { x: s.x, y: s.y };
         },
+        dropInfo: () => this.drops.snapshot(),
+        colliderInfo: () => {
+          const t = this.target;
+          if (!t) return null;
+          const all = t.grid.buildCollisionBoxes(100000).length;
+          const capped = t.grid.buildCollisionBoxes(760).length;
+          return {
+            needed: all,
+            capped,
+            live: t.colliderCount,
+            rebuilds: t.rebuilds,
+            lastDamage: t.lastDamage,
+          };
+        },
         ascii: (axis: 'front' | 'side' = 'front') => {
           const t = this.target;
           if (!t) return '';
@@ -226,6 +240,8 @@ export class Game {
     lowQuality(): void;
     ascii(axis?: 'front' | 'side'): string;
     aimRandom(): { x: number; y: number } | null;
+    dropInfo(): unknown;
+    colliderInfo(): unknown;
   } | null = null;
 
   get audioSystem(): AudioSystem {

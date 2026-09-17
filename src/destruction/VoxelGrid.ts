@@ -123,8 +123,8 @@ export class VoxelGrid {
   ): DamageResult {
     const out: DamageResult = { destroyed: [], damaged: [], coins: 0, hitCount: 0 };
     const r = Math.max(radius, 0.35);
-    const skipR = footprint > 0 ? footprint * 0.86 : 0;
-    const skipDepth = footprint > 0 ? footprint * 0.3 : 0;
+    const skipR = footprint > 0 ? footprint * 0.62 : 0;
+    const skipDepth = footprint > 0 ? footprint * 0.2 : 0;
     const x0 = Math.max(0, Math.floor(cx - r));
     const x1 = Math.min(this.sx - 1, Math.ceil(cx + r));
     const y0 = Math.max(0, Math.floor(cy - r));

@@ -166,7 +166,11 @@ export class Target {
     this.rebuildColliders();
   }
 
+  rebuilds = 0;
+  lastDamage: unknown = null;
+
   private rebuildColliders(): void {
+    this.rebuilds++;
     this.physics.removeCollidersOf(this.body);
     const boxes = this.grid.buildCollisionBoxes(760);
     const vs = this.voxelSize;
@@ -261,6 +265,14 @@ export class Target {
       this.holeCount += res.destroyed.length;
     }
     for (const cell of res.damaged) this.applyDamageTint(cell);
+    if (import.meta.env.DEV) this.lastDamage = {
+      gw: [Number(g.x.toFixed(2)), Number(g.y.toFixed(2)), Number(g.z.toFixed(2))],
+      rVox: Number(rVox.toFixed(2)),
+      damage: Number(damage.toFixed(1)),
+      footprintVox: Number((footprintWorld / this.voxelSize).toFixed(2)),
+      destroyed: res.destroyed.length,
+      hit: res.hitCount,
+    };
     return res;
   }
 
@@ -406,6 +418,10 @@ export class Target {
   /** Kept for camera fallbacks. */
   liveRadius(): number {
     return this.measure().radius;
+  }
+
+  get colliderCount(): number {
+    return this.body.numColliders();
   }
 
   get percentDestroyed(): number {
