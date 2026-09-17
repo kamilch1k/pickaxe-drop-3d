@@ -43,6 +43,7 @@ export interface ActiveDrop {
   body: RAPIER.RigidBody;
   hasHit: boolean;
   groundHits: number;
+  handleHits: number;
   state: 'falling' | 'channel' | 'done';
   life: number;
   channelLeft: number;
@@ -216,6 +217,7 @@ export class DropSystem {
       body,
       hasHit: false,
       groundHits: 0,
+      handleHits: 0,
       state: 'falling',
       life: 0,
       channelLeft: 0,
@@ -230,10 +232,14 @@ export class DropSystem {
       id: this.nextDropId++,
     };
 
-    for (const c of built.colliders) {
+    built.colliders.forEach((c, i) => {
       const col = physics.world.createCollider(c, body);
-      physics.registerCollider(col.handle, { kind: 'tool', ref: drop });
-    }
+      physics.registerCollider(col.handle, {
+        kind: 'tool',
+        ref: drop,
+        part: built.parts[i] ?? 'head',
+      });
+    });
 
     // Spawn velocity: a touch of horizontal drift for the pickaxes, downward
     // always, and never any depth component.
@@ -265,11 +271,42 @@ export class DropSystem {
   /* ------------------------------------------------------------- collision */
 
   /** Called by the game loop when one of our colliders touches something. */
-  handleContact(ref: unknown, other: OwnerKind): void {
+  handleContact(ref: unknown, other: OwnerKind, part: 'head' | 'handle' = 'head'): void {
     const drop = ref as ActiveDrop | null;
     if (!drop || !drop.body || drop.state === 'done') return;
-    if (other === 'target') this.impactOnTarget(drop);
-    else if (other === 'ground') this.impactOnGround(drop);
+    if (other === 'target') {
+      // Only the hard metal head bites into blocks. A wooden handle strike
+      // just clangs off and shoves the tool away.
+      if (part === 'handle') this.clang(drop);
+      else this.impactOnTarget(drop);
+    } else if (other === 'ground') {
+      this.impactOnGround(drop);
+    }
+  }
+
+  /** Handle-first landing: bounce away, kick the spin, no destruction. */
+  private clang(drop: ActiveDrop): void {
+    drop.handleHits++;
+    if (drop.handleHits > 4) return;
+    const t = drop.body.translation();
+    // shove it away from the target's centre and upward, with a spin kick
+    const away = TMP.set(t.x, 0, t.z);
+    if (away.lengthSq() < 1e-4) away.set(rand(-1, 1), 0, rand(-1, 1));
+    away.normalize();
+    const mass = Math.max(0.2, drop.built.mass);
+    const push = mass * (3.5 + rand(0, 2.5));
+    drop.body.applyImpulse(
+      { x: away.x * push, y: mass * 5.5, z: away.z * push },
+      true,
+    );
+    const spin = drop.body.angvel();
+    drop.body.setAngvel(
+      { x: spin.x, y: spin.y, z: spin.z + rand(-6, 6) },
+      true,
+    );
+    this.ctx.audio.impact('cloth', 0.5);
+    this.ctx.fx.voxelBurst(t.x, t.y, t.z, STONE_IDX, 0.45, 0.5);
+    this.ctx.camera.addShake(0.06);
   }
 
   /** Destruction radius in world units for the current target. */
@@ -396,7 +433,7 @@ export class DropSystem {
     const prog = this.ctx.progression;
     const finalRadius = radius * (crit ? 1.4 : 1);
     const finalDamage = damage * prog.damageMul * (crit ? 2.1 : 1);
-    const res = target.damage(pos, finalRadius, finalDamage);
+    const res = target.damage(pos, finalRadius, finalDamage, 900, 0, drop.def.maxBlocks);
 
     let dominant = STONE_IDX;
     const counts = new Map<number, number>();
@@ -458,6 +495,7 @@ export class DropSystem {
       dps * 0.075 * this.ctx.progression.damageMul,
       300,
       physR * 0.88,
+      drop.def.maxBlocks,
     );
     this.keepRolling(drop);
     if (!res.destroyed.length) {
@@ -604,7 +642,7 @@ export class DropSystem {
             const dmg = dps * 0.18 * this.ctx.progression.damageMul;
             target.snapToBlock(drop.tipWorld, 3);
             const radius = this.radiusWorld(drop, 0.7);
-            const res = target.damage(drop.tipWorld, radius, dmg, 260);
+            const res = target.damage(drop.tipWorld, radius, dmg, 260, 0, drop.def.maxBlocks);
             if (res.destroyed.length) {
               const mat = res.destroyed[0].mat;
               this.ctx.fx.voxelBurst(drop.tipWorld.x, drop.tipWorld.y, drop.tipWorld.z, mat, 0.5, 0.8);
@@ -686,6 +724,8 @@ export class DropSystem {
         state: d.state,
         stuck: d.stuck,
         hasHit: d.hasHit,
+        handleHits: d.handleHits,
+        groundHits: d.groundHits,
         rot: [Number(r.x.toFixed(3)), Number(r.y.toFixed(3)), Number(r.z.toFixed(3)), Number(r.w.toFixed(3))],
         angvel: [Number(w.x.toFixed(3)), Number(w.y.toFixed(3)), Number(w.z.toFixed(3))],
         sleep: d.body.isSleeping(),

@@ -15,6 +15,7 @@ import { TARGETS } from './content/targets';
 import { MATERIAL_IDS, MATERIALS } from './content/materials';
 import { BUILD_NUMBER } from './version';
 import { clamp, formatNumber } from './utils/math';
+import type { OwnerKind } from './physics/PhysicsWorld';
 import { Profiler } from './utils/Profiler';
 import { rand } from './utils/rng';
 
@@ -168,6 +169,7 @@ export class Game {
               bodies: this.physics.world.bodies.len(),
               voxels: this.target?.remaining ?? 0,
               enabledBodies: this.physics.enabledBodyCount(),
+              collapsed: this.collapsedBlocks,
             },
           };
         },
@@ -560,6 +562,8 @@ export class Game {
   }
 
   /** Unsupported chunks that broke off on their own still pay coins. */
+  collapsedBlocks = 0;
+
   private onCollapsed(
     voxels: DestroyedVoxel[],
     worldOf: (cell: number, out: THREE.Vector3) => THREE.Vector3,
@@ -581,6 +585,7 @@ export class Game {
       this.pendingCoins += coins;
       if (this.pendingTimer <= 0) this.pendingTimer = 0.2;
     }
+    this.collapsedBlocks += voxels.length;
     this.prog.noteDestroyed(voxels.length);
     this.ui.hud.flashBar();
     if (this.target) {
@@ -864,7 +869,9 @@ export class Game {
     while (this.accum >= FIXED_DT && steps < MAX_STEPS) {
       this.physics.step(FIXED_DT);
       const pi = prof.begin();
-      this.physics.drain((a, b) => this.routeCollision(a.kind, a.ref, b.kind, b.ref));
+      this.physics.drain((a, b) =>
+        this.routeCollision(a.kind, a.ref, a.part, b.kind, b.ref, b.part),
+      );
       prof.end('impacts', pi);
       this.accum -= FIXED_DT;
       steps++;
@@ -935,11 +942,16 @@ export class Game {
   private routeCollision(
     aKind: string,
     aRef: unknown,
+    aPart: 'head' | 'handle' | undefined,
     bKind: string,
     bRef: unknown,
+    bPart: 'head' | 'handle' | undefined,
   ): void {
-    if (aKind === 'tool') this.drops.handleContact(aRef, bKind as 'target' | 'ground' | 'debris' | 'prop');
-    else if (bKind === 'tool') this.drops.handleContact(bRef, aKind as 'target' | 'ground' | 'debris' | 'prop');
+    if (aKind === 'tool') {
+      this.drops.handleContact(aRef, bKind as OwnerKind, aPart);
+    } else if (bKind === 'tool') {
+      this.drops.handleContact(bRef, aKind as OwnerKind, bPart);
+    }
   }
 
   private animateAim(dt: number): void {

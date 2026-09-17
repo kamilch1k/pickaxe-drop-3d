@@ -362,6 +362,7 @@ export class Target {
     damage: number,
     maxKill = 900,
     footprintWorld = 0,
+    maxDestroy = Infinity,
   ): DamageResult {
     const g = this.toGrid(worldPoint, new THREE.Vector3());
     const rVox = Math.max(0.5, radiusWorld / this.voxelSize);
@@ -373,6 +374,7 @@ export class Target {
       damage,
       maxKill,
       footprintWorld / this.voxelSize,
+      maxDestroy,
     );
     if (res.destroyed.length) {
       for (const v of res.destroyed) this.removeInstance(v.cell, v.mat);

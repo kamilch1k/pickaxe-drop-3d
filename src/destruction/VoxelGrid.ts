@@ -111,6 +111,10 @@ export class VoxelGrid {
    * `footprint` (voxel units) keeps the voxels directly underneath a rolling
    * body alive: anything inside that column below the centre is skipped so a
    * sphere can ride the surface instead of digging itself in.
+   *
+   * `maxDestroy` genuinely caps how many blocks may be *destroyed* this hit -
+   * the closest blocks break first and everything else is only chipped. This is
+   * what makes the starter pickaxe break exactly one block.
    */
   damageSphere(
     cx: number,
@@ -120,6 +124,7 @@ export class VoxelGrid {
     damage: number,
     maxkill = 900,
     footprint = 0,
+    maxDestroy = Infinity,
   ): DamageResult {
     const out: DamageResult = { destroyed: [], damaged: [], coins: 0, hitCount: 0 };
     const r = Math.max(radius, 0.35);
@@ -132,6 +137,9 @@ export class VoxelGrid {
     const z0 = Math.max(0, Math.floor(cz - r));
     const z1 = Math.min(this.sz - 1, Math.ceil(cz + r));
 
+    const cells: number[] = [];
+    const dists: number[] = [];
+    const dmgs: number[] = [];
     for (let y = y0; y <= y1; y++) {
       for (let z = z0; z <= z1; z++) {
         for (let x = x0; x <= x1; x++) {
@@ -143,31 +151,47 @@ export class VoxelGrid {
           const dy = y - cy;
           const dz = z - cz;
           if (skipR > 0 && dy < -skipDepth && dx * dx + dz * dz < skipR * skipR) continue;
-          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          if (dist > r) continue;
-          const t = dist / r;
+          const d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 > r * r) continue;
+          const t = Math.sqrt(d2) / r;
           const falloff = t < 0.32 ? 1 : 1 - Math.pow((t - 0.32) / 0.68, 1.25);
           const dmg = damage * falloff;
           if (dmg <= 0.2) continue;
-          out.hitCount++;
-          if (this.hp[cell] - dmg <= 0) {
-            if (out.destroyed.length < maxkill) {
-              out.destroyed.push({
-                cell,
-                mat: this.mat[cell],
-                vx: x,
-                vy: y,
-                vz: z,
-                value: this.valueAt(cell),
-              });
-              out.coins += this.valueAt(cell);
-            }
-            this.kill(cell);
-          } else {
-            this.hp[cell] -= dmg;
-            out.damaged.push(cell);
-          }
+          cells.push(cell);
+          dists.push(d2);
+          dmgs.push(dmg);
         }
+      }
+    }
+
+    // nearest blocks die first, so a capped hit always bites the surface
+    const order = cells.map((_, i) => i).sort((a, b) => dists[a] - dists[b]);
+    let destroyed = 0;
+    for (const i of order) {
+      const cell = cells[i];
+      if (this.active[cell] !== 1) continue;
+      out.hitCount++;
+      const dmg = dmgs[i];
+      const dies = this.hp[cell] - dmg <= 0;
+      if (dies && destroyed < maxDestroy && out.destroyed.length < maxkill) {
+        const x = cell % this.sx;
+        const rest = (cell - x) / this.sx;
+        const z = rest % this.sz;
+        const y = (rest - z) / this.sz;
+        out.destroyed.push({
+          cell,
+          mat: this.mat[cell],
+          vx: x,
+          vy: y,
+          vz: z,
+          value: this.valueAt(cell),
+        });
+        out.coins += this.valueAt(cell);
+        destroyed++;
+        this.kill(cell);
+      } else {
+        this.hp[cell] = Math.max(1, this.hp[cell] - dmg);
+        out.damaged.push(cell);
       }
     }
     return out;

@@ -5,6 +5,8 @@ export type OwnerKind = 'target' | 'tool' | 'debris' | 'ground' | 'prop';
 export interface Owner {
   kind: OwnerKind;
   ref: unknown;
+  /** for tools: which compound part touched (only the head mines) */
+  part?: 'head' | 'handle';
 }
 
 export interface CollisionEvent {

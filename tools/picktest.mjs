@@ -48,6 +48,7 @@ const state = () =>
   page.evaluate(() => ({
     left: window.__game.remainingVoxels,
     stats: window.__game.dropStats,
+    collapsed: window.__game.dev.profileReport().counts.collapsed,
   }));
 
 const before = await state();
@@ -85,6 +86,7 @@ for (let i = 0; i < 26; i++) {
 }
 const after = await state();
 console.log('hits:', after.stats.targetHits, 'yields:', yields.join(','));
+console.log('collapsed blocks (physics fall-off):', after.collapsed);
 const avg = yields.length ? yields.reduce((a, b) => a + b, 0) / yields.length : 0;
 console.log(`avg blocks/hit: ${avg.toFixed(2)} over ${yields.length} hits`);
 console.log('remaining:', after.left, `(destroyed ${before.left - after.left})`);

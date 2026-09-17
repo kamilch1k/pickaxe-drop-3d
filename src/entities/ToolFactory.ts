@@ -7,6 +7,11 @@ import { TOOL_MATERIALS, type ToolDef, type ToolMaterialKey } from '../content/t
 export interface BuiltTool {
   group: THREE.Group;
   colliders: RAPIER.ColliderDesc[];
+  /**
+   * Which compound part each collider belongs to. Only the hard metal head
+   * mines blocks; the wooden handle just bounces off.
+   */
+  parts: ('head' | 'handle')[];
   tip: THREE.Vector3;
   mass: number;
   /** total radius of the compound shape, used for spawn offsets */
@@ -171,6 +176,7 @@ export function buildTool(def: ToolDef, RAPIER_NS: typeof RAPIER, scaleOverride?
   }
 
   const colliders: RAPIER.ColliderDesc[] = [];
+  const partKinds: ('head' | 'handle')[] = [];
   let mass = 0;
   let extent = 0.3 * scale;
   let tipX = 0;
@@ -219,6 +225,7 @@ export function buildTool(def: ToolDef, RAPIER_NS: typeof RAPIER, scaleOverride?
       .setActiveEvents(RAPIER_NS.ActiveEvents.COLLISION_EVENTS);
     desc.setDensity(p.density);
     colliders.push(desc);
+    partKinds.push(p.density > 1200 ? 'head' : 'handle');
   }
 
   const tip =
@@ -226,5 +233,5 @@ export function buildTool(def: ToolDef, RAPIER_NS: typeof RAPIER, scaleOverride?
       ? new THREE.Vector3(tipX / tipW, tipY / tipW, tipZ / tipW)
       : new THREE.Vector3(0, 0, 0);
 
-  return { group, colliders, tip, mass: Math.max(mass, 0.2), extent };
+  return { group, colliders, parts: partKinds, tip, mass: Math.max(mass, 0.2), extent };
 }

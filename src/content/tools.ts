@@ -58,6 +58,8 @@ export interface ToolDef {
   cooldown: number;
   /** damage at the centre of the impact */
   damage: number;
+  /** hard cap on how many blocks a single hit may destroy */
+  maxBlocks: number;
   /**
    * Destruction radius expressed in *blocks* (voxels) so every tool carves the
    * same shape regardless of how big the target's blocks are.
@@ -128,6 +130,7 @@ export const TOOLS: ToolDef[] = [
     requires: 0,
     cooldown: 0.16,
     damage: 42,
+    maxBlocks: 1,
     radiusBlocks: 0.78,
     spawnHeight: 7.5,
     gravityScale: 1,
@@ -154,6 +157,7 @@ export const TOOLS: ToolDef[] = [
     requires: 0,
     cooldown: 0.17,
     damage: 95,
+    maxBlocks: 3,
     radiusBlocks: 1.3,
     spawnHeight: 8,
     gravityScale: 1.05,
@@ -180,6 +184,7 @@ export const TOOLS: ToolDef[] = [
     requires: 0,
     cooldown: 0.19,
     damage: 130,
+    maxBlocks: 6,
     radiusBlocks: 1.6,
     spawnHeight: 8.5,
     gravityScale: 1.05,
@@ -206,6 +211,7 @@ export const TOOLS: ToolDef[] = [
     requires: 2,
     cooldown: 0.2,
     damage: 210,
+    maxBlocks: 12,
     radiusBlocks: 2.0,
     spawnHeight: 9,
     gravityScale: 1.1,
@@ -233,6 +239,7 @@ export const TOOLS: ToolDef[] = [
     requires: 1,
     cooldown: 2.2,
     damage: 520,
+    maxBlocks: 240,
     radiusBlocks: 4.6,
     spawnHeight: 7.5,
     gravityScale: 1.1,
@@ -266,6 +273,7 @@ export const TOOLS: ToolDef[] = [
     requires: 3,
     cooldown: 0.6,
     damage: 420,
+    maxBlocks: 45,
     radiusBlocks: 2.9,
     spawnHeight: 9.5,
     gravityScale: 1.15,
@@ -298,6 +306,7 @@ export const TOOLS: ToolDef[] = [
     requires: 3,
     cooldown: 0.9,
     damage: 90,
+    maxBlocks: 3,
     radiusBlocks: 1.7,
     channel: 1.8,
     channelDps: 260,
@@ -340,6 +349,7 @@ export const TOOLS: ToolDef[] = [
     requires: 4,
     cooldown: 2.6,
     damage: 260,
+    maxBlocks: 4,
     radiusBlocks: 2.6,
     channel: 9,
     channelDps: 900,
@@ -377,6 +387,7 @@ export const TOOLS: ToolDef[] = [
     requires: 4,
     cooldown: 1.1,
     damage: 170,
+    maxBlocks: 3,
     radiusBlocks: 1.6,
     channel: 2.6,
     channelDps: 320,
@@ -410,6 +421,7 @@ export const TOOLS: ToolDef[] = [
     requires: 5,
     cooldown: 6,
     damage: 210,
+    maxBlocks: 12,
     radiusBlocks: 2.0,
     spawnHeight: 11,
     gravityScale: 1.1,
@@ -437,6 +449,7 @@ export const TOOLS: ToolDef[] = [
     requires: 5,
     cooldown: 5,
     damage: 1800,
+    maxBlocks: 1200,
     radiusBlocks: 9,
     spawnHeight: 13,
     gravityScale: 1.35,
@@ -471,6 +484,7 @@ export const TOOLS: ToolDef[] = [
     requires: 6,
     cooldown: 9,
     damage: 6000,
+    maxBlocks: 4000,
     radiusBlocks: 19,
     spawnHeight: 14,
     gravityScale: 1.2,

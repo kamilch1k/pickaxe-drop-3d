@@ -38,6 +38,16 @@ the heavy head pushing the centre of mass toward the blade), and the target is
 still a full 3D voxel volume — a strike carves the block it hit, with damage
 spreading a few blocks into the depth so the crater never looks paper thin.
 
+**Only the metal head mines.** Each collider is tagged as `head` or `handle`, so
+a wooden-handle strike does not carve anything: it clangs, kicks the spin and
+shoves the pickaxe away to bounce again. Nearly half of badly-aimed drops bounce
+off harmlessly, which is what makes the good head-first hits read.
+
+**Hard per-hit block caps** keep every tool readable: the starter pickaxe breaks
+*exactly one block* per hit, then 3 → 6 → 12 → 45 as you unlock better tools, with
+explosives in the hundreds. Blocks closest to the impact always break first, so
+a capped hit still bites the surface instead of tunnelling.
+
 ## How to play
 
 - **Left click / tap** anywhere on the target to drop the selected object there.
