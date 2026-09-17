@@ -71,7 +71,6 @@ function toolMat(key: ToolMaterialKey): THREE.MeshStandardMaterial {
 function toolGeometries(
   def: ToolDef,
   scale: number,
-  com: THREE.Vector3,
 ): { mat: ToolMaterialKey; geo: THREE.BufferGeometry }[] {
   const key = `${def.id}|${scale.toFixed(3)}`;
   const cached = toolGeoCache.get(key);
@@ -102,7 +101,7 @@ function toolGeometries(
     }
     e.set(p.rot?.[0] ?? 0, p.rot?.[1] ?? 0, p.rot?.[2] ?? 0);
     q.setFromEuler(e);
-    pos.set(p.pos[0] * scale - com.x, p.pos[1] * scale - com.y, p.pos[2] * scale - com.z);
+    pos.set(p.pos[0] * scale, p.pos[1] * scale, p.pos[2] * scale);
     m4.compose(pos, q, one);
     // mergeGeometries needs a consistent index state across inputs: some of
     // three's primitives are indexed and others are not.
@@ -163,9 +162,8 @@ export function toolCentreOfMass(def: ToolDef, scale: number): THREE.Vector3 {
 
 export function buildTool(def: ToolDef, RAPIER_NS: typeof RAPIER, scaleOverride?: number): BuiltTool {
   const scale = scaleOverride ?? def.scale ?? 1;
-  const com = toolCentreOfMass(def, scale);
   const group = new THREE.Group();
-  for (const { mat, geo } of toolGeometries(def, scale, com)) {
+  for (const { mat, geo } of toolGeometries(def, scale)) {
     const mesh = new THREE.Mesh(geo, toolMat(mat));
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -186,9 +184,9 @@ export function buildTool(def: ToolDef, RAPIER_NS: typeof RAPIER, scaleOverride?
     const sz = (p.size[2] ?? 0) * scale;
     const vol = partVolume(p, scale);
 
-    const px = p.pos[0] * scale - com.x;
-    const py = p.pos[1] * scale - com.y;
-    const pz = p.pos[2] * scale - com.z;
+    const px = p.pos[0] * scale;
+    const py = p.pos[1] * scale;
+    const pz = p.pos[2] * scale;
     const partMass = vol * p.density;
     mass += p.decor ? 0 : partMass;
     const dist = Math.hypot(px, py, pz) + Math.max(sx, sy, sz) * 0.6;

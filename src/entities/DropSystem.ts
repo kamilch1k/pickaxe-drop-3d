@@ -55,11 +55,8 @@ export interface ActiveDrop {
   prevVel: THREE.Vector3;
   /** destruction radius in blocks, already scaled by upgrades */
   radiusBlocks: number;
-  /** constrained-rotation state (planar / axial tools) */
-  spinAxis: THREE.Vector3;
-  spinBase: THREE.Quaternion;
-  spinAngle: number;
-  spinVel: number;
+  /** stable id for QA instrumentation */
+  id: number;
 }
 
 interface PendingSpawn {
@@ -83,34 +80,16 @@ const RIGHT = new THREE.Vector3(1, 0, 0);
 const TMP = new THREE.Vector3();
 const QUAT = new THREE.Quaternion();
 const QUAT2 = new THREE.Quaternion();
-const CAM_DIR = new THREE.Vector3();
-const PLANAR_BASE = new THREE.Quaternion();
-const BASIS_X = new THREE.Vector3();
-const BASIS_Y = new THREE.Vector3();
-const BASIS_Z = new THREE.Vector3();
-const BASIS_M = new THREE.Matrix4();
+/** the interaction plane's normal: pickaxes spin about this axis */
+const FORWARD = new THREE.Vector3(0, 0, 1);
 const STONE_IDX = MATERIAL_IDS.indexOf('stone');
-
-/**
- * Base orientation that maps the tool's local +Z onto `axis` while keeping its
- * local +Y as close to world up as possible, so a spinning pickaxe always reads
- * as upright on screen.
- */
-function planarBase(axis: THREE.Vector3, out: THREE.Quaternion): THREE.Quaternion {
-  BASIS_Z.copy(axis).normalize();
-  BASIS_Y.set(0, 1, 0);
-  if (Math.abs(BASIS_Z.dot(BASIS_Y)) > 0.95) BASIS_Y.set(0, 0, 1);
-  BASIS_X.crossVectors(BASIS_Y, BASIS_Z).normalize();
-  BASIS_Y.crossVectors(BASIS_Z, BASIS_X).normalize();
-  BASIS_M.makeBasis(BASIS_X, BASIS_Y, BASIS_Z);
-  return out.setFromRotationMatrix(BASIS_M);
-}
 
 export class DropSystem {
   private drops: ActiveDrop[] = [];
   private pending: PendingSpawn[] = [];
   private cascades: Cascade[] = [];
   private cooldowns = new Map<string, number>();
+  private nextDropId = 1;
   totalDrops = 0;
   readonly stats = { spawned: 0, targetHits: 0, groundHits: 0, denied: 0, voxels: 0 };
 
@@ -185,17 +164,15 @@ export class DropSystem {
 
     const mode = def.spinMode;
     const q = QUAT;
-    let spinAxis: THREE.Vector3;
+    // The tool model is authored with its blade in the local XY plane, so an
+    // identity-ish orientation puts the whole silhouette inside the world XY
+    // plane - the plane the body is locked to below. Only the in-plane angle
+    // (about Z) varies per drop.
     if (mode === 'planar') {
-      // Spin in a vertical plane that faces the camera: the tool flips end
-      // over end on screen and can never tip onto its side.
-      spinAxis = CAM_DIR.copy(this.ctx.camera.camera.getWorldDirection(CAM_DIR)).normalize();
-      q.copy(planarBase(spinAxis, PLANAR_BASE));
+      q.setFromAxisAngle(FORWARD, rand(0, Math.PI * 2));
     } else if (mode === 'axial') {
-      spinAxis = UP.clone();
       q.setFromAxisAngle(UP, rand(0, Math.PI * 2));
     } else {
-      spinAxis = UP.clone();
       q.setFromAxisAngle(UP, rand(0, Math.PI * 2));
       if (def.kind === 'projectile') {
         QUAT2.setFromAxisAngle(RIGHT, rand(-0.6, 0.6));
@@ -211,21 +188,27 @@ export class DropSystem {
     built.group.quaternion.copy(q);
     scene.add(built.group);
 
+    // 2D-in-3D rigid body: X/Y translation plus rotation about Z only. These
+    // are real Rapier degree-of-freedom constraints, so the solver itself can
+    // never accumulate depth velocity or off-plane spin - no per-frame
+    // transform fighting is needed.
     const bodyDesc = physics.RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(x, y, z)
       .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w })
       .setLinearDamping(def.linearDamping)
       .setAngularDamping(def.angularDamping)
       .setGravityScale(def.gravityScale)
-      .setCcdEnabled(def.ccd === true);
-    // NOTE: Rapier's `enabledRotations` lock works on WORLD axes, which would
-    // let a pickaxe start spinning around world Z once it touches something.
-    // The constrained spin is therefore enforced in update() instead, where we
-    // own both the rotation and the angular velocity of the body.
+      .setCcdEnabled(def.ccd === true)
+      .enabledTranslations(true, true, false);
     const body = physics.world.createRigidBody(bodyDesc);
+    if (mode === 'planar') {
+      body.setEnabledRotations(false, false, true, true);
+    } else if (mode === 'axial') {
+      body.setEnabledRotations(false, true, false, true);
+    }
 
     const tip = built.tip.clone().applyQuaternion(q).add(built.group.position);
-    const spinVel = def.spin * rand(0.75, 1.25) * (rand(0, 1) < 0.5 ? 1 : -1);
+    const spin = def.spin * rand(0.75, 1.25) * (rand(0, 1) < 0.5 ? 1 : -1);
 
     const drop: ActiveDrop = {
       def,
@@ -244,10 +227,7 @@ export class DropSystem {
       impactPos: tip.clone(),
       prevVel: new THREE.Vector3(0, -2.5, 0),
       radiusBlocks: def.radiusBlocks * this.ctx.progression.radiusMul,
-      spinAxis,
-      spinBase: q.clone(),
-      spinAngle: rand(0, Math.PI * 2),
-      spinVel,
+      id: this.nextDropId++,
     };
 
     for (const c of built.colliders) {
@@ -255,8 +235,16 @@ export class DropSystem {
       physics.registerCollider(col.handle, { kind: 'tool', ref: drop });
     }
 
-    if (mode === 'free') {
-      // Tumble around the axis perpendicular to the handle.
+    // Spawn velocity: a touch of horizontal drift for the pickaxes, downward
+    // always, and never any depth component.
+    const lateral = mode === 'planar' ? rand(-0.5, 0.5) : 0;
+    body.setLinvel({ x: lateral, y: -2.5, z: 0 }, true);
+
+    if (mode === 'planar') {
+      body.setAngvel({ x: 0, y: 0, z: spin }, true);
+    } else if (mode === 'axial') {
+      body.setAngvel({ x: 0, y: spin, z: 0 }, true);
+    } else {
       const handleDir = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
       const tumble = new THREE.Vector3().crossVectors(
         handleDir,
@@ -265,17 +253,10 @@ export class DropSystem {
       if (tumble.lengthSq() < 1e-4) tumble.set(1, 0, 0);
       tumble.normalize();
       body.setAngvel(
-        { x: tumble.x * spinVel, y: tumble.y * spinVel * 0.35, z: tumble.z * spinVel },
-        true,
-      );
-    } else {
-      body.setAngvel(
-        { x: spinAxis.x * spinVel, y: spinAxis.y * spinVel, z: spinAxis.z * spinVel },
+        { x: tumble.x * spin, y: tumble.y * spin * 0.35, z: tumble.z * spin },
         true,
       );
     }
-    // Drop dead vertical: no lateral drift, no initial sideways shove.
-    body.setLinvel({ x: 0, y: -2.5, z: 0 }, true);
 
     this.drops.push(drop);
     this.ctx.audio.whoosh(def.kind === 'projectile' ? 1.4 : 1);
@@ -307,7 +288,6 @@ export class DropSystem {
     drop.impactPos.copy(drop.prevTipWorld).add(drop.tipWorld).multiplyScalar(0.5);
     // Snap onto the exact block that was struck so the crater is centred on it.
     target.snapToBlock(drop.impactPos, 3);
-    drop.spinVel *= 0.2;
 
     const speed = drop.prevVel.length();
     const expected = Math.sqrt(2 * 27 * drop.def.spawnHeight * this.ctx.progression.heightMul);
@@ -371,7 +351,6 @@ export class DropSystem {
     }
 
     this.applyImpact(drop, drop.impactPos, radius, drop.def.damage * quality, false);
-    drop.spinVel *= 0.25;
 
     if (drop.def.behavior === 'drill' || drop.def.behavior === 'saw') {
       drop.state = 'channel';
@@ -605,28 +584,6 @@ export class DropSystem {
       drop.prevVel.set(lv.x, lv.y, lv.z);
       drop.prevTipWorld.copy(drop.tipWorld);
 
-      // Constrained tools: the spin angle is authoritative, so the pickaxe
-      // always flips in its own plane and can never roll onto its side. Both
-      // the rotation and the angular velocity are overwritten every frame, so
-      // contact impulses can't introduce off-axis spin. (Tool geometry is built
-      // around its own centre of mass, so this rotation is COM-preserving and
-      // the tool falls dead straight.)
-      if (drop.def.spinMode !== 'free' && drop.state !== 'done') {
-        const damp = drop.hasHit ? 3.2 : drop.def.spinMode === 'planar' ? 0.12 : 0.02;
-        drop.spinVel *= Math.max(0, 1 - damp * dt);
-        drop.spinAngle += drop.spinVel * dt;
-        QUAT.setFromAxisAngle(drop.spinAxis, drop.spinAngle).multiply(drop.spinBase);
-        drop.body.setRotation({ x: QUAT.x, y: QUAT.y, z: QUAT.z, w: QUAT.w }, true);
-        drop.body.setAngvel(
-          {
-            x: drop.spinAxis.x * drop.spinVel,
-            y: drop.spinAxis.y * drop.spinVel,
-            z: drop.spinAxis.z * drop.spinVel,
-          },
-          true,
-        );
-      }
-
       const t = drop.body.translation();
       const r = drop.body.rotation();
       drop.built.group.position.set(t.x, t.y, t.z);
@@ -724,6 +681,7 @@ export class DropSystem {
       const w = d.body.angvel();
       const r = d.body.rotation();
       return {
+        id: d.id,
         tool: d.def.id,
         state: d.state,
         stuck: d.stuck,

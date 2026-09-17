@@ -21,17 +21,22 @@ npm run preview    # serve the production build
 
 ## Mining feel
 
-Pickaxes are sized to the blocks and dropped **dead vertical** — no lateral
-spread, no sideways shove. Each one is locked to a single rotation axis: it
-spins only in a plane facing the camera around its own Z axis, and X/Y rotation
-is overwritten every frame from both the rotation and the angular velocity, so a
-pickaxe can never tip onto its side or start tumbling around world Z after it
-lands. The tool geometry is built around its own centre of mass, which is what
-makes that constraint free of drift. Drills and saws spin on their own axis;
-anvils, bombs, boulders and meteors keep full rigid-body rotation.
+Falling pickaxes are **2D rigid bodies embedded in a 3D world**. Each drop is
+locked to its own vertical interaction plane (the world XY plane at the z it was
+aimed at) using real Rapier degree-of-freedom constraints, not per-frame
+transform fixes:
 
-A strike carves exactly the block it hit (and a growing cluster as you unlock
-better tools), so the crater grows where you aim.
+- translation: X yes, Y yes, **Z locked** — no depth drift, ever
+- rotation: X no, Y no, **Z only** — the silhouette stays flat to the target and
+  can never turn edge-on, roll around its handle or flip into another plane
+- spawn gives it downward velocity, a touch of horizontal drift and a **pure Z
+  angular velocity**; everything after that (falling, bouncing, sliding, the
+  clockwise/counter-clockwise spin after a corner hit) is genuinely simulated
+
+Colliders are still 3D compound shapes (a narrow handle plus a wide head, with
+the heavy head pushing the centre of mass toward the blade), and the target is
+still a full 3D voxel volume — a strike carves the block it hit, with damage
+spreading a few blocks into the depth so the crater never looks paper thin.
 
 ## How to play
 
