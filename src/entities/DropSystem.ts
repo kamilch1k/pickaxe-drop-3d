@@ -53,7 +53,13 @@ export interface ActiveDrop {
   prevTipWorld: THREE.Vector3;
   impactPos: THREE.Vector3;
   prevVel: THREE.Vector3;
-  radius: number;
+  /** destruction radius in blocks, already scaled by upgrades */
+  radiusBlocks: number;
+  /** constrained-rotation state (planar / axial tools) */
+  spinAxis: THREE.Vector3;
+  spinBase: THREE.Quaternion;
+  spinAngle: number;
+  spinVel: number;
 }
 
 interface PendingSpawn {
@@ -73,10 +79,32 @@ interface Cascade {
 }
 
 const UP = new THREE.Vector3(0, 1, 0);
+const RIGHT = new THREE.Vector3(1, 0, 0);
 const TMP = new THREE.Vector3();
 const QUAT = new THREE.Quaternion();
 const QUAT2 = new THREE.Quaternion();
+const CAM_DIR = new THREE.Vector3();
+const PLANAR_BASE = new THREE.Quaternion();
+const BASIS_X = new THREE.Vector3();
+const BASIS_Y = new THREE.Vector3();
+const BASIS_Z = new THREE.Vector3();
+const BASIS_M = new THREE.Matrix4();
 const STONE_IDX = MATERIAL_IDS.indexOf('stone');
+
+/**
+ * Base orientation that maps the tool's local +Z onto `axis` while keeping its
+ * local +Y as close to world up as possible, so a spinning pickaxe always reads
+ * as upright on screen.
+ */
+function planarBase(axis: THREE.Vector3, out: THREE.Quaternion): THREE.Quaternion {
+  BASIS_Z.copy(axis).normalize();
+  BASIS_Y.set(0, 1, 0);
+  if (Math.abs(BASIS_Z.dot(BASIS_Y)) > 0.95) BASIS_Y.set(0, 0, 1);
+  BASIS_X.crossVectors(BASIS_Y, BASIS_Z).normalize();
+  BASIS_Y.crossVectors(BASIS_Z, BASIS_X).normalize();
+  BASIS_M.makeBasis(BASIS_X, BASIS_Y, BASIS_Z);
+  return out.setFromRotationMatrix(BASIS_M);
+}
 
 export class DropSystem {
   private drops: ActiveDrop[] = [];
@@ -155,19 +183,30 @@ export class DropSystem {
     const y = height + rand(-0.3, 0.6);
     built.group.position.set(x, y, z);
 
+    const mode = def.spinMode;
     const q = QUAT;
-    if (def.kind === 'blunt' || def.kind === 'projectile') {
+    let spinAxis: THREE.Vector3;
+    if (mode === 'planar') {
+      // Spin in a vertical plane that faces the camera: the tool flips end
+      // over end on screen and can never tip onto its side.
+      spinAxis = CAM_DIR.copy(this.ctx.camera.camera.getWorldDirection(CAM_DIR)).normalize();
+      q.copy(planarBase(spinAxis, PLANAR_BASE));
+    } else if (mode === 'axial') {
+      spinAxis = UP.clone();
+      q.setFromAxisAngle(UP, rand(0, Math.PI * 2));
+    } else {
+      spinAxis = UP.clone();
       q.setFromAxisAngle(UP, rand(0, Math.PI * 2));
       if (def.kind === 'projectile') {
-        QUAT2.setFromAxisAngle(new THREE.Vector3(1, 0, 0), rand(-0.6, 0.6));
+        QUAT2.setFromAxisAngle(RIGHT, rand(-0.6, 0.6));
+        q.multiply(QUAT2);
+      } else {
+        QUAT2.setFromAxisAngle(
+          new THREE.Vector3(rand(-1, 1), 0, rand(-1, 1)).normalize(),
+          rand(0.2, 0.8),
+        );
         q.multiply(QUAT2);
       }
-    } else {
-      // Bias the heavy head downward, then add intentional tumble.
-      q.setFromAxisAngle(UP, rand(0, Math.PI * 2));
-      const axis = new THREE.Vector3(rand(-1, 1), 0, rand(-1, 1)).normalize();
-      QUAT2.setFromAxisAngle(axis, rand(0.2, 0.75));
-      q.multiply(QUAT2);
     }
     built.group.quaternion.copy(q);
     scene.add(built.group);
@@ -179,10 +218,11 @@ export class DropSystem {
         .setLinearDamping(def.linearDamping)
         .setAngularDamping(def.angularDamping)
         .setGravityScale(def.gravityScale)
-        .setCcdEnabled(true),
+        .setCcdEnabled(def.ccd === true),
     );
 
     const tip = built.tip.clone().applyQuaternion(q).add(built.group.position);
+    const spinVel = def.spin * rand(0.75, 1.25) * (rand(0, 1) < 0.5 ? 1 : -1);
 
     const drop: ActiveDrop = {
       def,
@@ -200,7 +240,11 @@ export class DropSystem {
       prevTipWorld: tip.clone(),
       impactPos: tip.clone(),
       prevVel: new THREE.Vector3(0, -2.5, 0),
-      radius: def.radius * this.ctx.progression.radiusMul,
+      radiusBlocks: def.radiusBlocks * this.ctx.progression.radiusMul,
+      spinAxis,
+      spinBase: q.clone(),
+      spinAngle: rand(0, Math.PI * 2),
+      spinVel,
     };
 
     for (const c of built.colliders) {
@@ -208,20 +252,26 @@ export class DropSystem {
       physics.registerCollider(col.handle, { kind: 'tool', ref: drop });
     }
 
-    // Tumble end-over-end around the axis perpendicular to the handle.
-    const handleDir = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
-    const tumble = new THREE.Vector3().crossVectors(
-      handleDir,
-      new THREE.Vector3(rand(-1, 1), rand(-0.2, 0.2), rand(-1, 1)),
-    );
-    if (tumble.lengthSq() < 1e-4) tumble.set(1, 0, 0);
-    tumble.normalize();
-    const spin = def.spin * rand(0.7, 1.25);
-    body.setAngvel(
-      { x: tumble.x * spin, y: tumble.y * spin * 0.35 + rand(-0.8, 0.8), z: tumble.z * spin },
-      true,
-    );
-    body.setLinvel({ x: rand(-0.9, 0.9), y: -2.5, z: rand(-0.9, 0.9) }, true);
+    if (mode === 'free') {
+      // Tumble around the axis perpendicular to the handle.
+      const handleDir = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+      const tumble = new THREE.Vector3().crossVectors(
+        handleDir,
+        new THREE.Vector3(rand(-1, 1), rand(-0.2, 0.2), rand(-1, 1)),
+      );
+      if (tumble.lengthSq() < 1e-4) tumble.set(1, 0, 0);
+      tumble.normalize();
+      body.setAngvel(
+        { x: tumble.x * spinVel, y: tumble.y * spinVel * 0.35, z: tumble.z * spinVel },
+        true,
+      );
+    } else {
+      body.setAngvel(
+        { x: spinAxis.x * spinVel, y: spinAxis.y * spinVel, z: spinAxis.z * spinVel },
+        true,
+      );
+    }
+    body.setLinvel({ x: rand(-0.7, 0.7), y: -2.5, z: rand(-0.7, 0.7) }, true);
 
     this.drops.push(drop);
     this.ctx.audio.whoosh(def.kind === 'projectile' ? 1.4 : 1);
@@ -237,6 +287,13 @@ export class DropSystem {
     else if (other === 'ground') this.impactOnGround(drop);
   }
 
+  /** Destruction radius in world units for the current target. */
+  private radiusWorld(drop: ActiveDrop, scale = 1): number {
+    const target = this.ctx.getTarget();
+    const block = target ? target.voxelSize : 0.7;
+    return drop.radiusBlocks * block * scale;
+  }
+
   private impactOnTarget(drop: ActiveDrop): void {
     if (drop.hasHit || drop.state === 'done') return;
     drop.hasHit = true;
@@ -244,20 +301,21 @@ export class DropSystem {
     const target = this.ctx.getTarget();
     if (!target) return;
     drop.impactPos.copy(drop.prevTipWorld).add(drop.tipWorld).multiplyScalar(0.5);
-    // keep the impact just under the surface for a believable crater
-    drop.impactPos.y -= drop.radius * 0.12;
-    target.snapToSurface(drop.impactPos, 8);
+    // Snap onto the exact block that was struck so the crater is centred on it.
+    target.snapToBlock(drop.impactPos, 3);
+    drop.spinVel *= 0.2;
 
     const speed = drop.prevVel.length();
     const expected = Math.sqrt(2 * 27 * drop.def.spawnHeight * this.ctx.progression.heightMul);
     const quality = clamp(speed / Math.max(6, expected), 0.4, 1.45);
+    const radius = this.radiusWorld(drop);
 
     if (drop.def.behavior === 'explosive' || drop.def.behavior === 'meteor') {
       drop.state = 'channel';
       drop.channelLeft = 0.2;
       this.cascades.push({
         pos: drop.impactPos.clone(),
-        radius: drop.radius,
+        radius,
         damage: drop.def.damage * quality,
         tool: drop.def,
         timer: drop.def.behavior === 'meteor' ? 0.03 : 0.16,
@@ -268,18 +326,25 @@ export class DropSystem {
 
     if (drop.def.behavior === 'roll') {
       // A rolling body bites sideways and keeps its footing underneath.
-      const physR = drop.def.bodyRadius ?? 1.6;
+      const physR = (drop.def.bodyRadius ?? 1.6) * drop.def.scale;
       const t = drop.body.translation();
       TMP.set(t.x, t.y, t.z);
       const bite = target.damage(
         TMP,
-        drop.radius * 0.72,
-        drop.def.damage * quality * 0.45,
+        radius * 0.72,
+        drop.def.damage * quality * 0.45 * this.ctx.progression.damageMul,
         600,
-        physR * 0.95,
+        physR * 0.88,
       );
       const mat = bite.destroyed.length ? bite.destroyed[0].mat : STONE_IDX;
-      this.ctx.fx.impactBurst(TMP.x, TMP.y - physR * 0.6, TMP.z, drop.radius * 0.8, mat, 0.9);
+      this.ctx.fx.impactBurst(
+        TMP.x,
+        TMP.y - physR * 0.6,
+        TMP.z,
+        Math.max(0.6, radius * 0.8),
+        mat,
+        0.9,
+      );
       this.ctx.audio.impact('stone', 0.9);
       if (bite.destroyed.length) {
         this.ctx.debris.beginBudget(8);
@@ -287,7 +352,7 @@ export class DropSystem {
           position: TMP.clone(),
           voxels: bite.destroyed.length,
           coins: Math.round(bite.coins * this.ctx.progression.coinMul * drop.def.coinBonus),
-          radius: drop.radius * 0.72,
+          radius: radius * 0.72,
           power: 0.6,
           material: mat,
           crit: false,
@@ -301,7 +366,8 @@ export class DropSystem {
       return;
     }
 
-    this.applyImpact(drop, drop.impactPos, drop.radius, drop.def.damage * quality, false);
+    this.applyImpact(drop, drop.impactPos, radius, drop.def.damage * quality, false);
+    drop.spinVel *= 0.25;
 
     if (drop.def.behavior === 'drill' || drop.def.behavior === 'saw') {
       drop.state = 'channel';
@@ -400,11 +466,12 @@ export class DropSystem {
   private rollChew(drop: ActiveDrop, target: Target): void {
     const t = drop.body.translation();
     TMP.set(t.x, t.y, t.z);
-    const physR = drop.def.bodyRadius ?? 1.6;
+    const physR = (drop.def.bodyRadius ?? 1.6) * drop.def.scale;
     const dps = drop.def.channelDps ?? 140;
+    const radius = this.radiusWorld(drop);
     const res = target.damage(
       TMP,
-      drop.radius,
+      radius,
       dps * 0.075 * this.ctx.progression.damageMul,
       300,
       physR * 0.88,
@@ -417,7 +484,7 @@ export class DropSystem {
       return;
     }
     const mat = res.destroyed[0].mat;
-    this.ctx.fx.voxelBurst(TMP.x, TMP.y - physR * 0.45, TMP.z, mat, 0.6, 0.9);
+    this.ctx.fx.voxelBurst(TMP.x, TMP.y - physR * 0.45, TMP.z, mat, 0.65, 0.9);
     this.ctx.fx.dust.emit({
       x: TMP.x,
       y: t.y - physR * 0.7,
@@ -443,7 +510,7 @@ export class DropSystem {
       position: TMP.clone(),
       voxels: res.destroyed.length,
       coins: Math.round(res.coins * this.ctx.progression.coinMul * drop.def.coinBonus),
-      radius: drop.radius,
+      radius,
       power: 0.35,
       material: mat,
       crit: false,
@@ -455,7 +522,7 @@ export class DropSystem {
   private keepRolling(drop: ActiveDrop): void {
     const body = drop.body;
     const v = body.linvel();
-    const physR = drop.def.bodyRadius ?? 1.6;
+    const physR = (drop.def.bodyRadius ?? 1.6) * drop.def.scale;
     const targetSpeed = drop.def.rollSpeed ?? 8;
     let hx = v.x;
     let hz = v.z;
@@ -533,6 +600,25 @@ export class DropSystem {
       const lv = drop.body.linvel();
       drop.prevVel.set(lv.x, lv.y, lv.z);
       drop.prevTipWorld.copy(drop.tipWorld);
+
+      // Constrained tools: the spin angle is authoritative, so the pickaxe
+      // always flips in its own plane and can never roll onto its side.
+      if (drop.def.spinMode !== 'free' && drop.state !== 'done') {
+        const damp = drop.def.spinMode === 'planar' ? 0.12 : 0.02;
+        drop.spinVel *= Math.max(0, 1 - damp * dt);
+        drop.spinAngle += drop.spinVel * dt;
+        QUAT.setFromAxisAngle(drop.spinAxis, drop.spinAngle).multiply(drop.spinBase);
+        drop.body.setRotation({ x: QUAT.x, y: QUAT.y, z: QUAT.z, w: QUAT.w }, true);
+        drop.body.setAngvel(
+          {
+            x: drop.spinAxis.x * drop.spinVel,
+            y: drop.spinAxis.y * drop.spinVel,
+            z: drop.spinAxis.z * drop.spinVel,
+          },
+          true,
+        );
+      }
+
       const t = drop.body.translation();
       const r = drop.body.rotation();
       drop.built.group.position.set(t.x, t.y, t.z);
@@ -549,47 +635,48 @@ export class DropSystem {
             this.rollChew(drop, target);
           } else {
             drop.channelTick = 0.18;
-          const dps = drop.def.channelDps ?? 40;
-          const dmg = dps * 0.18 * this.ctx.progression.damageMul;
-          target.snapToSurface(drop.tipWorld, 4);
-          const res = target.damage(drop.tipWorld, drop.radius * 0.6, dmg, 260);
-          if (res.destroyed.length) {
-            const mat = res.destroyed[0].mat;
-            this.ctx.fx.voxelBurst(drop.tipWorld.x, drop.tipWorld.y, drop.tipWorld.z, mat, 0.5, 0.8);
-            this.ctx.fx.puff(drop.tipWorld.x, drop.tipWorld.y, drop.tipWorld.z, mat, 5);
-            this.ctx.audio.impact('stone', 0.35);
-            this.ctx.debris.beginBudget(2);
-            this.ctx.onImpact({
-              position: drop.tipWorld.clone(),
-              voxels: res.destroyed.length,
-              coins: Math.round(res.coins * this.ctx.progression.coinMul * drop.def.coinBonus),
-              radius: drop.radius * 0.6,
-              power: 0.25,
-              material: mat,
-              crit: false,
-              tool: drop.def,
-            });
-          } else {
-            this.ctx.fx.sparks.emit({
-              x: drop.tipWorld.x,
-              y: drop.tipWorld.y,
-              z: drop.tipWorld.z,
-              count: 7,
-              dir: UP,
-              spread: 0.9,
-              speedMin: 3,
-              speedMax: 9,
-              sizeMin: 0.05,
-              sizeMax: 0.1,
-              lifeMin: 0.15,
-              lifeMax: 0.35,
-              gravity: -16,
-              drag: 1,
-              colors: [0xffd07a, 0xffffff],
-              alpha: 1,
-            });
-            if (drop.def.behavior === 'drill') this.ctx.audio.impact('metal', 0.2);
-          }
+            const dps = drop.def.channelDps ?? 40;
+            const dmg = dps * 0.18 * this.ctx.progression.damageMul;
+            target.snapToBlock(drop.tipWorld, 3);
+            const radius = this.radiusWorld(drop, 0.7);
+            const res = target.damage(drop.tipWorld, radius, dmg, 260);
+            if (res.destroyed.length) {
+              const mat = res.destroyed[0].mat;
+              this.ctx.fx.voxelBurst(drop.tipWorld.x, drop.tipWorld.y, drop.tipWorld.z, mat, 0.5, 0.8);
+              this.ctx.fx.puff(drop.tipWorld.x, drop.tipWorld.y, drop.tipWorld.z, mat, 5);
+              this.ctx.audio.impact('stone', 0.35);
+              this.ctx.debris.beginBudget(2);
+              this.ctx.onImpact({
+                position: drop.tipWorld.clone(),
+                voxels: res.destroyed.length,
+                coins: Math.round(res.coins * this.ctx.progression.coinMul * drop.def.coinBonus),
+                radius,
+                power: 0.25,
+                material: mat,
+                crit: false,
+                tool: drop.def,
+              });
+            } else {
+              this.ctx.fx.sparks.emit({
+                x: drop.tipWorld.x,
+                y: drop.tipWorld.y,
+                z: drop.tipWorld.z,
+                count: 7,
+                dir: UP,
+                spread: 0.9,
+                speedMin: 3,
+                speedMax: 9,
+                sizeMin: 0.05,
+                sizeMax: 0.1,
+                lifeMin: 0.15,
+                lifeMax: 0.35,
+                gravity: -16,
+                drag: 1,
+                colors: [0xffd07a, 0xffffff],
+                alpha: 1,
+              });
+              if (drop.def.behavior === 'drill') this.ctx.audio.impact('metal', 0.2);
+            }
           }
         }
         if (drop.channelLeft <= 0) drop.state = 'done';

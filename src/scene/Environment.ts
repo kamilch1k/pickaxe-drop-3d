@@ -136,7 +136,7 @@ export class Environment {
       metalness: 0.05,
       color: 0xffffff,
     });
-    const PLAT = 21;
+    const PLAT = 16;
     this.platformHalf = PLAT;
     const deck = new THREE.Mesh(new RoundedBoxGeometry(PLAT * 2, 2.6, PLAT * 2, 3, 0.55), stoneMat);
     deck.position.y = -1.3;
@@ -186,7 +186,6 @@ export class Environment {
       const pz = sz * (PLAT - 2.4);
       const post = new THREE.Mesh(new THREE.BoxGeometry(0.55, 4.6, 0.55), woodMat);
       post.position.set(px, 2.3, pz);
-      post.castShadow = true;
       this.group.add(post);
       const arm = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 1.5), woodMat2);
       arm.position.set(px, 4.5, pz - sz * 0.7);
@@ -205,7 +204,6 @@ export class Environment {
       const crate = new THREE.Mesh(new THREE.BoxGeometry(s, s, s), rng.chance(0.5) ? woodMat : woodMat2);
       crate.position.set(Math.cos(a) * d, s / 2, Math.sin(a) * d);
       crate.rotation.y = rng.range(0, Math.PI);
-      crate.castShadow = true;
       crate.receiveShadow = true;
       this.group.add(crate);
       if (rng.chance(0.6)) {
@@ -238,7 +236,6 @@ export class Environment {
       gem.position.set(Math.cos(a) * d, h / 2 - 0.2, Math.sin(a) * d);
       gem.rotation.z = rng.range(-0.25, 0.25);
       gem.rotation.x = rng.range(-0.25, 0.25);
-      gem.castShadow = true;
       this.group.add(gem);
       this.floats.push({ obj: gem, baseY: gem.position.y, phase: rng.range(0, 6.28), amp: 0.06 });
     }

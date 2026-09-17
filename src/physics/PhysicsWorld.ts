@@ -22,7 +22,7 @@ export class PhysicsWorld {
   async init(gravityY = -27): Promise<void> {
     await RAPIER.init();
     this.world = new RAPIER.World({ x: 0, y: gravityY, z: 0 });
-    this.world.integrationParameters.numSolverIterations = 6;
+    this.world.integrationParameters.numSolverIterations = 4;
     this.events = new RAPIER.EventQueue(true);
     this.ready = true;
   }

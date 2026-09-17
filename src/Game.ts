@@ -13,13 +13,16 @@ import { Ui } from './ui/Ui';
 import { TOOLS, type ToolDef } from './content/tools';
 import { TARGETS } from './content/targets';
 import { MATERIAL_IDS, MATERIALS } from './content/materials';
-import { GRID_X, GRID_Z } from './destruction/builders';
 import { BUILD_NUMBER } from './version';
 import { clamp, formatNumber } from './utils/math';
+import { Profiler } from './utils/Profiler';
 import { rand } from './utils/rng';
 
 const FIXED_DT = 1 / 60;
-const MAX_STEPS = 5;
+const MAX_STEPS = 4;
+const RAY_ORIGIN = new THREE.Vector3();
+const RAY_DIR = new THREE.Vector3();
+const AIM_SCRATCH = new THREE.Vector3();
 
 type Phase = 'boot' | 'intro' | 'playing' | 'transitioning';
 
@@ -36,8 +39,9 @@ export class Game {
   private target: Target | null = null;
   private phase: Phase = 'boot';
 
-  private raycaster = new THREE.Raycaster();
   private pointerNdc = new THREE.Vector2(0, 0);
+  private aimDirty = true;
+  private profiler = new Profiler();
   private aim = new THREE.Vector3();
   private hasAim = false;
   private aimGroup = new THREE.Group();
@@ -140,6 +144,32 @@ export class Game {
         },
         reload: () => this.loadTarget(this.prog.targetIndex, true),
         lowQuality: () => this.rig.forceLowQuality(),
+        profile: (on: boolean) => {
+          this.profiler.enabled = on;
+          if (on) this.profiler.reset();
+        },
+        profileReport: () => {
+          const r = this.profiler.report();
+          const info = this.rig.renderer.info;
+          return {
+            ...r,
+            render: {
+              calls: info.render.calls,
+              triangles: info.render.triangles,
+              geometries: info.memory.geometries,
+              textures: info.memory.textures,
+              programs: info.programs?.length ?? 0,
+            },
+            counts: {
+              drops: this.drops.activeCount,
+              particles: this.fx.dust.count + this.fx.sparks.count,
+              debris: this.debris.activeCount,
+              colliders: this.physics.world.colliders.len(),
+              bodies: this.physics.world.bodies.len(),
+              voxels: this.target?.remaining ?? 0,
+            },
+          };
+        },
         aimRandom: () => {
           const t = this.target;
           if (!t) return null;
@@ -238,6 +268,8 @@ export class Game {
     setTarget(index: number): void;
     reload(): void;
     lowQuality(): void;
+    profile(on: boolean): void;
+    profileReport(): unknown;
     ascii(axis?: 'front' | 'side'): string;
     aimRandom(): { x: number; y: number } | null;
     dropInfo(): unknown;
@@ -733,28 +765,49 @@ export class Game {
     const w = window.innerWidth;
     const h = window.innerHeight;
     this.pointerNdc.set((clientX / w) * 2 - 1, -(clientY / h) * 2 + 1);
-    this.raycaster.setFromCamera(this.pointerNdc, this.rig.director.camera);
-    this.raycaster.far = 400;
-    const objects: THREE.Object3D[] = [this.env.deck];
-    if (this.target) objects.push(this.target.group);
-    const hits = this.raycaster.intersectObjects(objects, true);
+    this.aimDirty = true;
+  }
+
+  /**
+   * Resolves the aim point. Runs at most once per frame: a voxel-grid DDA
+   * against the target plus an analytic plane test against the deck, instead of
+   * raycasting every instanced voxel on every pointer event.
+   */
+  private resolveAim(): void {
+    if (!this.aimDirty) return;
+    this.aimDirty = false;
+    const cam = this.rig.director.camera;
+    RAY_ORIGIN.setFromMatrixPosition(cam.matrixWorld);
+    RAY_DIR.set(this.pointerNdc.x, this.pointerNdc.y, 0.5)
+      .unproject(cam)
+      .sub(RAY_ORIGIN)
+      .normalize();
+
     let point: THREE.Vector3 | null = null;
-    for (const hit of hits) {
-      if (hit.point.y > -0.6) {
-        point = hit.point.clone();
-        break;
+    let onTarget = false;
+    const target = this.target;
+    if (target) {
+      const hit = target.raycastVoxels(RAY_ORIGIN, RAY_DIR, 200);
+      if (hit) {
+        point = hit.point;
+        onTarget = true;
       }
     }
     if (!point) {
-      const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-      const hit = new THREE.Vector3();
-      if (this.raycaster.ray.intersectPlane(plane, hit)) {
-        const half = this.env.platformHalf - 1.2;
-        hit.x = clamp(hit.x, -half, half);
-        hit.z = clamp(hit.z, -half, half);
-        point = hit;
+      // analytic platform hit
+      if (RAY_DIR.y < -1e-4) {
+        const t = -RAY_ORIGIN.y / RAY_DIR.y;
+        if (t > 0 && t < 300) {
+          const px = RAY_ORIGIN.x + RAY_DIR.x * t;
+          const pz = RAY_ORIGIN.z + RAY_DIR.z * t;
+          const half = this.env.platformHalf - 0.8;
+          if (Math.abs(px) < half && Math.abs(pz) < half) {
+            point = AIM_SCRATCH.set(px, 0, pz);
+          }
+        }
       }
     }
+
     if (!point) {
       this.hasAim = false;
       this.aimGroup.visible = false;
@@ -763,18 +816,10 @@ export class Game {
     this.hasAim = true;
     this.aim.copy(point);
     this.aimGroup.visible = true;
-    this.aimGroup.position.set(point.x, point.y + 0.05, point.z);
+    this.aimGroup.position.set(point.x, point.y + 0.06, point.z);
 
-    const target = this.target;
-    const overTarget =
-      !!target &&
-      target.grid.isActiveAt(
-        Math.floor(point.x / target.voxelSize + GRID_X / 2),
-        Math.floor(point.y / target.voxelSize),
-        Math.floor(point.z / target.voxelSize + GRID_Z / 2),
-      );
     const ringMat = this.aimRing.material as THREE.MeshBasicMaterial;
-    ringMat.color.setHex(overTarget ? 0xffe08a : 0x9ec6ff);
+    ringMat.color.setHex(onTarget ? 0xffe08a : 0x9ec6ff);
     const beamMat = this.aimBeam.material as THREE.MeshBasicMaterial;
     beamMat.color.copy(ringMat.color);
   }
@@ -783,6 +828,8 @@ export class Game {
 
   private frame = (now: number): void => {
     requestAnimationFrame(this.frame);
+    const prof = this.profiler;
+    const p0 = prof.begin();
     const raw = Math.min(0.084, (now - this.lastFrame) / 1000);
     this.lastFrame = now;
     this.time += raw;
@@ -799,21 +846,33 @@ export class Game {
 
     const dt = raw * this.timeScale;
     this.env.update(raw, this.time);
+    const p1 = prof.begin();
     this.drops.update(dt < 0.0005 ? 0 : dt);
+    const p2 = prof.begin();
+    prof.end('drops', p1);
 
     this.accum += dt;
     let steps = 0;
     while (this.accum >= FIXED_DT && steps < MAX_STEPS) {
       this.physics.step(FIXED_DT);
+      const pi = prof.begin();
       this.physics.drain((a, b) => this.routeCollision(a.kind, a.ref, b.kind, b.ref));
+      prof.end('impacts', pi);
       this.accum -= FIXED_DT;
       steps++;
     }
     if (steps === MAX_STEPS) this.accum = 0;
+    const p3 = prof.begin();
+    prof.end('physics', p2);
 
     if (this.target) this.target.update(dt);
+    const p4 = prof.begin();
+    prof.end('target', p3);
     this.debris.update(dt);
+    const p5 = prof.begin();
+    prof.end('debris', p4);
     this.fx.update(raw);
+    prof.end('effects', p5);
 
     if (this.comboTimer > 0) {
       this.comboTimer -= raw;
@@ -837,6 +896,8 @@ export class Game {
       }
     }
 
+    const p7 = prof.begin();
+    this.resolveAim();
     this.animateAim(raw);
     if (this.target && this.phase === 'playing') {
       const m = this.target.measure();
@@ -853,7 +914,12 @@ export class Game {
       this.lastAffordableCheck = this.prog.coins;
       this.refreshUpgradeHint();
     }
+    prof.end('ui', p7);
+    const p8 = prof.begin();
     this.rig.render(raw);
+    prof.end('render', p8);
+    prof.end('frame', p0);
+    prof.tick();
   };
 
   private lastAffordableCheck = -1;

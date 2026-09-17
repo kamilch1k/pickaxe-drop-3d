@@ -24,7 +24,8 @@ export interface EmitConfig {
   alpha?: number;
 }
 
-const V = new THREE.Vector3();
+const SCRATCH_COLOR = new THREE.Color();
+const DEFAULT_DIR = new THREE.Vector3(0, 1, 0);
 
 export class ParticlePool {
   readonly points: THREE.Points;
@@ -134,7 +135,8 @@ export class ParticlePool {
   }
 
   emit(cfg: EmitConfig): void {
-    const dir = cfg.dir ?? V.set(0, 1, 0).clone();
+    if (cfg.count <= 0) return;
+    const dir = cfg.dir ?? DEFAULT_DIR;
     const spread = cfg.spread ?? 0.4;
     const speedMin = cfg.speedMin ?? 2;
     const speedMax = cfg.speedMax ?? 6;
@@ -185,7 +187,7 @@ export class ParticlePool {
       this.baseAlpha[i] = alpha;
 
       const c = colors[(Math.random() * colors.length) | 0];
-      const col = c instanceof THREE.Color ? c : new THREE.Color(c);
+      const col = c instanceof THREE.Color ? c : SCRATCH_COLOR.setHex(c as number);
       const jitter = rand(0.85, 1.15);
       const ca = this.colA.array as Float32Array;
       ca[i * 3] = Math.min(1, col.r * jitter);
@@ -195,6 +197,7 @@ export class ParticlePool {
   }
 
   update(dt: number): void {
+    if (this.count === 0) return;
     const pa = this.posA.array as Float32Array;
     const ca = this.sizeA.array as Float32Array;
     const aa = this.alphaA.array as Float32Array;

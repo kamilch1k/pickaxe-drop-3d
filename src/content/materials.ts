@@ -348,7 +348,7 @@ export const MATERIAL_IDS = Object.keys(MATERIALS);
  * (stone = 1, gold = 12 ...) which keeps them readable; this multiplier turns
  * them into satisfying payouts per voxel.
  */
-export const COIN_SCALE = 4.2;
+export const COIN_SCALE = 12;
 
 export function materialIndexOf(id: string): number {
   return MATERIAL_IDS.indexOf(id);

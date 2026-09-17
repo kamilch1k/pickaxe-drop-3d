@@ -19,6 +19,13 @@ npm run build      # typecheck + production bundle in dist/
 npm run preview    # serve the production build
 ```
 
+## Mining feel
+
+Pickaxes are sized to the blocks, fall straight, and flip in a plane facing the
+camera — they never tip onto their side. A strike carves exactly the block it
+hit (and a growing cluster as you unlock better tools), so the crater grows
+where you aim instead of where the physics engine happened to shove a sphere.
+
 ## How to play
 
 - **Left click / tap** anywhere on the target to drop the selected object there.

@@ -47,6 +47,7 @@ export class Target {
   private spawnT = -1;
   private spawnBounce = 0;
   private measureCache: { radius: number; height: number } | null = null;
+  private measureAge = 0;
   private disposed = false;
 
   constructor(
@@ -192,7 +193,7 @@ export class Target {
       this.physics.registerCollider(c.handle, { kind: 'target', ref: this });
     }
     this.colliderDirty = false;
-    this.rebuildTimer = 0.09;
+    this.rebuildTimer = 0.15;
   }
 
   /* ---------------------------------------------------------------- damage */
@@ -204,6 +205,123 @@ export class Target {
       v.y / this.voxelSize - 0.5,
       v.z / this.voxelSize + GRID_Z / 2 - 0.5,
     );
+  }
+
+  /**
+   * Fast voxel raycast (Amanatides & Woo DDA) straight against the occupancy
+   * grid. This replaces raycasting thousands of InstancedMesh instances every
+   * mouse move, which was the single biggest CPU cost in the game.
+   */
+  raycastVoxels(
+    origin: THREE.Vector3,
+    dir: THREE.Vector3,
+    maxDist = 160,
+  ): { point: THREE.Vector3; normal: THREE.Vector3; cell: number } | null {
+    const vs = this.voxelSize;
+    const ox = origin.x / vs + GRID_X / 2 - 0.5;
+    const oy = origin.y / vs - 0.5;
+    const oz = origin.z / vs + GRID_Z / 2 - 0.5;
+
+    let dvx = dir.x / vs;
+    let dvy = dir.y / vs;
+    let dvz = dir.z / vs;
+    const dl = Math.hypot(dvx, dvy, dvz);
+    if (dl < 1e-6) return null;
+    dvx /= dl;
+    dvy /= dl;
+    dvz /= dl;
+
+    let ix = Math.floor(ox);
+    let iy = Math.floor(oy);
+    let iz = Math.floor(oz);
+    const stepX = dvx > 0 ? 1 : -1;
+    const stepY = dvy > 0 ? 1 : -1;
+    const stepZ = dvz > 0 ? 1 : -1;
+    const tDeltaX = Math.abs(1 / (dvx || 1e-9));
+    const tDeltaY = Math.abs(1 / (dvy || 1e-9));
+    const tDeltaZ = Math.abs(1 / (dvz || 1e-9));
+    let tMaxX = dvx === 0 ? Infinity : (dvx > 0 ? ix + 1 - ox : ox - ix) * tDeltaX;
+    let tMaxY = dvy === 0 ? Infinity : (dvy > 0 ? iy + 1 - oy : oy - iy) * tDeltaY;
+    let tMaxZ = dvz === 0 ? Infinity : (dvz > 0 ? iz + 1 - oz : oz - iz) * tDeltaZ;
+
+    const maxT = maxDist / vs;
+    let t = 0;
+    let face = -1;
+    const out = new THREE.Vector3();
+    const normal = new THREE.Vector3();
+    for (let guard = 0; guard < 512 && t <= maxT; guard++) {
+      if (ix >= 0 && iy >= 0 && iz >= 0 && ix < GRID_X && iy < GRID_Y && iz < GRID_Z) {
+        const cell = this.grid.index(ix, iy, iz);
+        if (this.grid.active[cell] === 1) {
+          out.copy(origin).addScaledVector(dir, t * vs);
+          if (face === 0) normal.set(-stepX, 0, 0);
+          else if (face === 1) normal.set(0, -stepY, 0);
+          else if (face === 2) normal.set(0, 0, -stepZ);
+          else normal.set(0, 1, 0);
+          return { point: out, normal, cell };
+        }
+      }
+      if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+        ix += stepX;
+        t = tMaxX;
+        tMaxX += tDeltaX;
+        face = 0;
+      } else if (tMaxY <= tMaxZ) {
+        iy += stepY;
+        t = tMaxY;
+        tMaxY += tDeltaY;
+        face = 1;
+      } else {
+        iz += stepZ;
+        t = tMaxZ;
+        tMaxZ += tDeltaZ;
+        face = 2;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Finds the solid block nearest to a world point and snaps the point to that
+   * block's exact centre. This is what makes a hit remove the block the tool
+   * actually touched instead of an arbitrary sphere in space.
+   */
+  snapToBlock(p: THREE.Vector3, maxSearch = 3): boolean {
+    const g = this.toGrid(p, GRID_SCRATCH);
+    const baseX = Math.round(g.x);
+    const baseZ = Math.round(g.z);
+    const baseY = Math.round(g.y);
+    let best = -1;
+    let bestD = Infinity;
+    for (let ring = 0; ring <= maxSearch; ring++) {
+      for (let ox = -ring; ox <= ring; ox++) {
+        for (let oz = -ring; oz <= ring; oz++) {
+          for (let oy = -ring; oy <= ring; oy++) {
+            if (
+              ring > 0 &&
+              Math.abs(ox) !== ring &&
+              Math.abs(oz) !== ring &&
+              Math.abs(oy) !== ring
+            ) {
+              continue;
+            }
+            const x = baseX + ox;
+            const y = baseY + oy;
+            const z = baseZ + oz;
+            if (!this.grid.isActiveAt(x, y, z)) continue;
+            const d = ox * ox + oy * oy + oz * oz;
+            if (d < bestD) {
+              bestD = d;
+              best = this.grid.index(x, y, z);
+            }
+          }
+        }
+      }
+      if (best >= 0) break;
+    }
+    if (best < 0) return false;
+    this.worldOf(best, p);
+    return true;
   }
 
   /**
@@ -352,6 +470,7 @@ export class Target {
 
   update(dt: number): void {
     if (this.disposed) return;
+    this.measureAge += dt;
     if (this.rebuildTimer > 0) this.rebuildTimer -= dt;
     if (this.structureTimer > 0) this.structureTimer -= dt;
 
@@ -380,7 +499,7 @@ export class Target {
     if (this.colliderDirty && this.rebuildTimer <= 0) this.rebuildColliders();
     if (this.structureDirty && this.structureTimer <= 0) {
       this.structureDirty = false;
-      this.structureTimer = 0.16;
+      this.structureTimer = 0.28;
       this.collapseUnsupported();
     }
   }
@@ -392,7 +511,8 @@ export class Target {
 
   /** Real bounds of the remaining shape (cached until something breaks). */
   measure(): { radius: number; height: number } {
-    if (this.measureCache) return this.measureCache;
+    if (this.measureCache && this.measureAge < 0.35) return this.measureCache;
+    this.measureAge = 0;
     let maxR2 = 0;
     let maxY = 0;
     for (let i = 0; i < this.grid.size; i++) {

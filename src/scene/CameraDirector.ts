@@ -37,9 +37,11 @@ export class CameraDirector {
   frame(t: FrameTarget): void {
     const tanV = Math.tan(((this.baseFov + this.fovOffset) * Math.PI) / 360);
     const tanH = tanV * Math.max(0.6, this.camera.aspect);
-    const dRadius = (t.radius * 1.38) / tanH;
-    const dHeight = (t.height * 0.68) / tanV;
-    this.desiredDistance = clamp(Math.max(dRadius, dHeight) + t.height * 0.08, 17, 165);
+    // Framed so the whole target (plus its surroundings) stays on screen with
+    // comfortable margin, at any aspect ratio.
+    const dRadius = (t.radius * 1.75) / tanH;
+    const dHeight = (t.height * 0.9) / tanV;
+    this.desiredDistance = clamp(Math.max(dRadius, dHeight) + t.height * 0.12, 18, 200);
     this.desiredLookAt.set(t.center.x, t.center.y + t.height * 0.06, t.center.z);
   }
 

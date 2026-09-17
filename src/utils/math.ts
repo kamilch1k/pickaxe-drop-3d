@@ -15,25 +15,29 @@ export const damp = (a: number, b: number, lambda: number, dt: number) =>
 
 export const TAU = Math.PI * 2;
 
+const GROUP_RE = /\B(?=(\d{3})+(?!\d))/g;
+
+/** Fast integer formatting with thousands separators (no Intl per call). */
 export function formatNumber(n: number): string {
   if (!isFinite(n)) return '0';
-  const v = Math.floor(n);
-  if (v < 10000) return v.toLocaleString('en-US');
+  const v = Math.floor(Math.abs(n));
+  if (v < 1000) return (n < 0 ? '-' : '') + String(v);
+  if (v < 10000) return (n < 0 ? '-' : '') + String(v).replace(GROUP_RE, ',');
   const units = [
     { s: 1e15, u: 'Q' },
     { s: 1e12, u: 'T' },
     { s: 1e9, u: 'B' },
     { s: 1e6, u: 'M' },
-    { s: 1e3, u: 'K' },
   ];
   for (const { s, u } of units) {
     if (v >= s) {
       const scaled = v / s;
-      return (scaled < 10 ? scaled.toFixed(1) : Math.floor(scaled).toString()) + u;
+      return (n < 0 ? '-' : '') + (scaled < 10 ? scaled.toFixed(1) : Math.floor(scaled).toString()) + u;
     }
   }
-  return v.toLocaleString('en-US');
+  return (n < 0 ? '-' : '') + String(v).replace(GROUP_RE, ',');
 }
+
 
 export function formatTime(seconds: number): string {
   const s = Math.max(0, seconds);

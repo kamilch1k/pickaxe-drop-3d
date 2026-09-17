@@ -137,9 +137,11 @@ export class VoxelGrid {
         for (let x = x0; x <= x1; x++) {
           const cell = this.index(x, y, z);
           if (this.active[cell] !== 1) continue;
-          const dx = x + 0.5 - cx;
-          const dy = y + 0.5 - cy;
-          const dz = z + 0.5 - cz;
+          // Grid space: a voxel's centre sits exactly at its integer index, so
+          // one block of distance == 1.0. This keeps `radiusBlocks` meaningful.
+          const dx = x - cx;
+          const dy = y - cy;
+          const dz = z - cz;
           if (skipR > 0 && dy < -skipDepth && dx * dx + dz * dz < skipR * skipR) continue;
           const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
           if (dist > r) continue;

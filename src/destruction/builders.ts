@@ -12,14 +12,22 @@ export class Writer {
     readonly g: VoxelGrid,
     readonly ox: number,
     readonly oz: number,
+    /** uniform shrink applied to every authored coordinate */
+    readonly shrink = 1,
   ) {}
 
   set(x: number, y: number, z: number, mat: string, hpMul = 1): void {
-    this.g.set(Math.round(x + this.ox), Math.round(y), Math.round(z + this.oz), mat, hpMul);
+    const s = this.shrink;
+    this.g.set(Math.round(x * s + this.ox), Math.round(y * s), Math.round(z * s + this.oz), mat, hpMul);
   }
 
   get(x: number, y: number, z: number): boolean {
-    return this.g.isActiveAt(Math.round(x + this.ox), Math.round(y), Math.round(z + this.oz));
+    const s = this.shrink;
+    return this.g.isActiveAt(
+      Math.round(x * s + this.ox),
+      Math.round(y * s),
+      Math.round(z * s + this.oz),
+    );
   }
 
   box(
@@ -154,16 +162,31 @@ export const GRID_X = 40;
 export const GRID_Y = 46;
 export const GRID_Z = 40;
 
-function makeGrid(): { grid: VoxelGrid; w: Writer } {
+/**
+ * Per-target uniform shrink of the authored shapes. Big blocks + fewer of them
+ * keeps every target readable at the camera distance while keeping the block
+ * count (and therefore the time to clear) small.
+ */
+export const SHRINK = {
+  oreChunk: 0.52,
+  goldVein: 0.48,
+  crystalFormation: 0.57,
+  treasureBlock: 0.52,
+  memeCreature: 0.5,
+  obsidianBeast: 0.56,
+  mythicCore: 0.49,
+} as const;
+
+function makeGrid(shrink = 1): { grid: VoxelGrid; w: Writer } {
   const grid = new VoxelGrid(GRID_X, GRID_Y, GRID_Z);
-  const w = new Writer(grid, Math.floor(GRID_X / 2), Math.floor(GRID_Z / 2));
+  const w = new Writer(grid, Math.floor(GRID_X / 2), Math.floor(GRID_Z / 2), shrink);
   return { grid, w };
 }
 
 /* ------------------------------------------------------------------ rocks */
 
 function buildOreChunk(rng: Rng) {
-  const { grid, w } = makeGrid();
+  const { grid, w } = makeGrid(SHRINK.oreChunk);
   const noise = new ValueNoise(24, rng);
   const R = 8.0;
   const H = 10.6;
@@ -212,7 +235,7 @@ function buildOreChunk(rng: Rng) {
 }
 
 function buildGoldVein(rng: Rng) {
-  const { grid, w } = makeGrid();
+  const { grid, w } = makeGrid(SHRINK.goldVein);
   const noise = new ValueNoise(24, rng);
   const R = 11.2;
   const H = 11.5;
@@ -248,7 +271,7 @@ function buildGoldVein(rng: Rng) {
 }
 
 function buildCrystalFormation(rng: Rng) {
-  const { grid, w } = makeGrid();
+  const { grid, w } = makeGrid(SHRINK.crystalFormation);
   // dark base
   w.ellipsoid(0, -1.6, 0, 12.4, 4.4, 12.4, 'deepstone');
   w.ellipsoid(0, 0.6, 0, 10.6, 2.6, 10.6, 'deepstone');
@@ -285,7 +308,7 @@ function buildCrystalFormation(rng: Rng) {
 }
 
 function buildTreasureBlock(rng: Rng) {
-  const { grid, w } = makeGrid();
+  const { grid, w } = makeGrid(SHRINK.treasureBlock);
   // iron chest frame
   w.box(-8, 0, -8, 8, 0, 8, 'iron');
   w.box(-8, 0, -8, 8, 12, 8, 'iron');
@@ -337,7 +360,7 @@ function buildTreasureBlock(rng: Rng) {
 /* --------------------------------------------------------------- creature */
 
 function buildMemeCreature(rng: Rng) {
-  const { grid, w } = makeGrid();
+  const { grid, w } = makeGrid(SHRINK.memeCreature);
   // tiny legs
   w.box(-3.4, 0, -2.5, -1.4, 6, 2.5, 'furDark');
   w.box(1.4, 0, -2.5, 3.4, 6, 2.5, 'furDark');
@@ -398,7 +421,7 @@ function buildMemeCreature(rng: Rng) {
 }
 
 function buildObsidianBeast(rng: Rng) {
-  const { grid, w } = makeGrid();
+  const { grid, w } = makeGrid(SHRINK.obsidianBeast);
   // legs
   w.box(-5, 0, -3, -1.6, 9, 3, 'obsidian');
   w.box(1.6, 0, -3, 5, 9, 3, 'obsidian');
@@ -462,7 +485,7 @@ function buildObsidianBeast(rng: Rng) {
 }
 
 function buildMythicCore(rng: Rng) {
-  const { grid, w } = makeGrid();
+  const { grid, w } = makeGrid(SHRINK.mythicCore);
   // stepped pedestal
   w.box(-13, 0, -13, 13, 1, 13, 'deepstone');
   w.box(-11, 2, -11, 11, 4, 11, 'obsidian');

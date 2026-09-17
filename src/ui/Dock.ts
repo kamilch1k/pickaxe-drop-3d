@@ -15,6 +15,7 @@ interface Chip {
   cd: HTMLElement;
   price: HTMLElement;
   name: HTMLElement;
+  cdValue: number;
 }
 
 export class Dock {
@@ -99,7 +100,7 @@ export class Dock {
       });
 
       this.root.appendChild(chip);
-      this.chips.push({ def, root: chip, cd, price, name });
+      this.chips.push({ def, root: chip, cd, price, name, cdValue: -1 });
     }
     this.unlockedCount = this.prog.unlocked.size;
   }
