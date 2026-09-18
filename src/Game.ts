@@ -15,7 +15,7 @@ import { TARGETS } from './content/targets';
 import { MATERIAL_IDS, MATERIALS } from './content/materials';
 import { BUILD_NUMBER } from './version';
 import { clamp, formatNumber } from './utils/math';
-import type { OwnerKind } from './physics/PhysicsWorld';
+import type { Owner, OwnerKind } from './physics/PhysicsWorld';
 import { Profiler } from './utils/Profiler';
 import { rand } from './utils/rng';
 
@@ -869,8 +869,8 @@ export class Game {
     while (this.accum >= FIXED_DT && steps < MAX_STEPS) {
       this.physics.step(FIXED_DT);
       const pi = prof.begin();
-      this.physics.drain((a, b) =>
-        this.routeCollision(a.kind, a.ref, a.part, b.kind, b.ref, b.part),
+      this.physics.drain((a, b, h1, h2) =>
+        this.routeCollision(a, b, h1, h2),
       );
       prof.end('impacts', pi);
       this.accum -= FIXED_DT;
@@ -939,18 +939,11 @@ export class Game {
 
   private lastAffordableCheck = -1;
 
-  private routeCollision(
-    aKind: string,
-    aRef: unknown,
-    aPart: 'head' | 'handle' | undefined,
-    bKind: string,
-    bRef: unknown,
-    bPart: 'head' | 'handle' | undefined,
-  ): void {
-    if (aKind === 'tool') {
-      this.drops.handleContact(aRef, bKind as OwnerKind, aPart);
-    } else if (bKind === 'tool') {
-      this.drops.handleContact(bRef, aKind as OwnerKind, bPart);
+  private routeCollision(a: Owner, b: Owner, h1: number, h2: number): void {
+    if (a.kind === 'tool') {
+      this.drops.handleContact(a.ref, b.kind as OwnerKind, a.part, h1, h2);
+    } else if (b.kind === 'tool') {
+      this.drops.handleContact(b.ref, a.kind as OwnerKind, b.part, h1, h2);
     }
   }
 

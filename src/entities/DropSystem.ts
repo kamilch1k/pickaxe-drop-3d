@@ -89,6 +89,12 @@ const FORWARD = new THREE.Vector3(0, 0, 1);
 const STONE_IDX = MATERIAL_IDS.indexOf('stone');
 /** Minimum arrival speed for a pickaxe head to bite into blocks (m/s). */
 const MIN_MINE_SPEED = 3.2;
+/**
+ * How strongly planar tools squash their crater along the plane normal. The
+ * blade is only ~a third of a block thick, so a spherical crater would carve
+ * blocks in front of and behind it that the tool never touched.
+ */
+const PLANE_FLATTEN = 2.6;
 
 export class DropSystem {
   private drops: ActiveDrop[] = [];
@@ -277,14 +283,20 @@ export class DropSystem {
   /* ------------------------------------------------------------- collision */
 
   /** Called by the game loop when one of our colliders touches something. */
-  handleContact(ref: unknown, other: OwnerKind, part: 'head' | 'handle' = 'head'): void {
+  handleContact(
+    ref: unknown,
+    other: OwnerKind,
+    part: 'head' | 'handle' = 'head',
+    h1 = 0,
+    h2 = 0,
+  ): void {
     const drop = ref as ActiveDrop | null;
     if (!drop || !drop.body || drop.state === 'done') return;
     if (other === 'target') {
       // Only the hard metal head bites into blocks, and only when it arrives
       // with real speed. A wooden handle strike never mines.
       if (part === 'handle') this.clang(drop);
-      else this.impactOnTarget(drop);
+      else this.impactOnTarget(drop, h1, h2);
     } else if (other === 'ground') {
       this.impactOnGround(drop);
     }
@@ -316,7 +328,7 @@ export class DropSystem {
     return drop.radiusBlocks * block * scale;
   }
 
-  private impactOnTarget(drop: ActiveDrop): void {
+  private impactOnTarget(drop: ActiveDrop, h1 = 0, h2 = 0): void {
     // Only a drop still in free fall may bite. Channel tools and explosives
     // switch state on their first contact and must not re-trigger.
     if (drop.state !== 'falling') return;
@@ -330,9 +342,15 @@ export class DropSystem {
     drop.mineCooldown = 0.16;
     drop.hasHit = true;
     this.stats.targetHits++;
-    drop.impactPos.copy(drop.prevTipWorld).add(drop.tipWorld).multiplyScalar(0.5);
-    // Snap onto the exact block that was struck so the crater is centred on it.
-    target.snapToBlock(drop.impactPos, 3);
+
+    // Prefer the solver's real contact point so the crater starts exactly where
+    // the blade touched, not at the head's centre.
+    const contact = h1 && h2 ? this.ctx.physics.contactPoint(h1, h2) : null;
+    if (contact) drop.impactPos.set(contact.x, contact.y, contact.z);
+    else drop.impactPos.copy(drop.prevTipWorld).add(drop.tipWorld).multiplyScalar(0.5);
+    // Snap onto the exact block that was struck (one block of slack, so a
+    // corner graze can never teleport the crater further away).
+    target.snapToBlock(drop.impactPos, 1);
 
     const expected = Math.sqrt(2 * 27 * drop.def.spawnHeight * this.ctx.progression.heightMul);
     const quality = clamp(speed / Math.max(6, expected), 0.4, 1.45);
@@ -443,7 +461,15 @@ export class DropSystem {
     const prog = this.ctx.progression;
     const finalRadius = radius * (crit ? 1.4 : 1);
     const finalDamage = damage * prog.damageMul * (crit ? 2.1 : 1);
-    const res = target.damage(pos, finalRadius, finalDamage, 900, 0, drop.def.maxBlocks);
+    const res = target.damage(
+      pos,
+      finalRadius,
+      finalDamage,
+      900,
+      0,
+      drop.def.maxBlocks,
+      drop.def.spinMode === 'free' ? 1 : PLANE_FLATTEN,
+    );
 
     let dominant = STONE_IDX;
     const counts = new Map<number, number>();

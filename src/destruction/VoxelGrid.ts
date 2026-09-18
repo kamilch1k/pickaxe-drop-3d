@@ -125,6 +125,7 @@ export class VoxelGrid {
     maxkill = 900,
     footprint = 0,
     maxDestroy = Infinity,
+    flattenZ = 1,
   ): DamageResult {
     const out: DamageResult = { destroyed: [], damaged: [], coins: 0, hitCount: 0 };
     const r = Math.max(radius, 0.35);
@@ -149,7 +150,9 @@ export class VoxelGrid {
           // one block of distance == 1.0. This keeps `radiusBlocks` meaningful.
           const dx = x - cx;
           const dy = y - cy;
-          const dz = z - cz;
+          // flattenZ squashes the blast along the tool's plane normal so a
+          // flat blade does not gouge blocks it never touched in depth.
+          const dz = (z - cz) * flattenZ;
           if (skipR > 0 && dy < -skipDepth && dx * dx + dz * dz < skipR * skipR) continue;
           const d2 = dx * dx + dy * dy + dz * dz;
           if (d2 > r * r) continue;

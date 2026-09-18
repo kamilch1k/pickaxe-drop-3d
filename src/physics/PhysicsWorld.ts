@@ -45,6 +45,34 @@ export class PhysicsWorld {
     return this.owners.get(handle);
   }
 
+  /**
+   * Average world-space contact point between two colliders as the solver
+   * currently sees it. Used to start a crater exactly where the tool touched
+   * instead of at the tool's centre.
+   */
+  contactPoint(h1: number, h2: number): { x: number; y: number; z: number } | null {
+    const c1 = this.world.getCollider(h1);
+    const c2 = this.world.getCollider(h2);
+    if (!c1 || !c2) return null;
+    let px = 0;
+    let py = 0;
+    let pz = 0;
+    let n = 0;
+    this.world.contactPair(c1, c2, (manifold) => {
+      const count = manifold.numSolverContacts();
+      for (let i = 0; i < count; i++) {
+        const p = manifold.solverContactPoint(i);
+        if (!p) continue;
+        px += p.x;
+        py += p.y;
+        pz += p.z;
+        n++;
+      }
+    });
+    if (n === 0) return null;
+    return { x: px / n, y: py / n, z: pz / n };
+  }
+
   bodyOf(handle: number): RAPIER.RigidBody | null {
     const col = this.world.getCollider(handle);
     return col ? col.parent() : null;
@@ -59,12 +87,12 @@ export class PhysicsWorld {
    * Drains collision-start and contact-force events into a single callback.
    * `force` is 0 for plain collision starts.
    */
-  drain(onEvent: (a: Owner, b: Owner) => void): void {
+  drain(onEvent: (a: Owner, b: Owner, h1: number, h2: number) => void): void {
     this.events.drainCollisionEvents((h1, h2, started) => {
       if (!started) return;
       const a = this.owners.get(h1);
       const b = this.owners.get(h2);
-      if (a && b) onEvent(a, b);
+      if (a && b) onEvent(a, b, h1, h2);
     });
   }
 

@@ -363,6 +363,7 @@ export class Target {
     maxKill = 900,
     footprintWorld = 0,
     maxDestroy = Infinity,
+    flattenZ = 1,
   ): DamageResult {
     const g = this.toGrid(worldPoint, new THREE.Vector3());
     const rVox = Math.max(0.5, radiusWorld / this.voxelSize);
@@ -375,6 +376,7 @@ export class Target {
       maxKill,
       footprintWorld / this.voxelSize,
       maxDestroy,
+      flattenZ,
     );
     if (res.destroyed.length) {
       for (const v of res.destroyed) this.removeInstance(v.cell, v.mat);
@@ -385,14 +387,31 @@ export class Target {
       this.holeCount += res.destroyed.length;
     }
     for (const cell of res.damaged) this.applyDamageTint(cell);
-    if (import.meta.env.DEV) this.lastDamage = {
-      gw: [Number(g.x.toFixed(2)), Number(g.y.toFixed(2)), Number(g.z.toFixed(2))],
-      rVox: Number(rVox.toFixed(2)),
-      damage: Number(damage.toFixed(1)),
-      footprintVox: Number((footprintWorld / this.voxelSize).toFixed(2)),
-      destroyed: res.destroyed.length,
-      hit: res.hitCount,
-    };
+    if (import.meta.env.DEV) {
+      // how far the destroyed blocks sat from the impact, so tooling can prove
+      // the crater matches what the blade actually touched
+      let maxDz = 0;
+      let maxDxy = 0;
+      for (const v of res.destroyed) {
+        const dx = v.vx - g.x;
+        const dy = v.vy - g.y;
+        const dz = v.vz - g.z;
+        if (Math.abs(dz) > maxDz) maxDz = Math.abs(dz);
+        const dxy = Math.hypot(dx, dy);
+        if (dxy > maxDxy) maxDxy = dxy;
+      }
+      this.lastDamage = {
+        gw: [Number(g.x.toFixed(2)), Number(g.y.toFixed(2)), Number(g.z.toFixed(2))],
+        rVox: Number(rVox.toFixed(2)),
+        damage: Number(damage.toFixed(1)),
+        footprintVox: Number((footprintWorld / this.voxelSize).toFixed(2)),
+        flattenZ,
+        destroyed: res.destroyed.length,
+        hit: res.hitCount,
+        maxDz: Number(maxDz.toFixed(2)),
+        maxDxy: Number(maxDxy.toFixed(2)),
+      };
+    }
     return res;
   }
 
