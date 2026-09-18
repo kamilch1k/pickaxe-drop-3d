@@ -59,6 +59,8 @@ export interface ActiveDrop {
   radiusBlocks: number;
   /** stable id for QA instrumentation */
   id: number;
+  /** seconds until this drop may mine again (stops multi-collider double bites) */
+  mineCooldown: number;
 }
 
 interface PendingSpawn {
@@ -85,6 +87,8 @@ const QUAT2 = new THREE.Quaternion();
 /** the interaction plane's normal: pickaxes spin about this axis */
 const FORWARD = new THREE.Vector3(0, 0, 1);
 const STONE_IDX = MATERIAL_IDS.indexOf('stone');
+/** Minimum arrival speed for a pickaxe head to bite into blocks (m/s). */
+const MIN_MINE_SPEED = 3.2;
 
 export class DropSystem {
   private drops: ActiveDrop[] = [];
@@ -231,6 +235,7 @@ export class DropSystem {
       prevVel: new THREE.Vector3(0, -2.5, 0),
       radiusBlocks: def.radiusBlocks * this.ctx.progression.radiusMul,
       id: this.nextDropId++,
+      mineCooldown: 0,
     };
 
     built.colliders.forEach((c, i) => {
@@ -276,8 +281,8 @@ export class DropSystem {
     const drop = ref as ActiveDrop | null;
     if (!drop || !drop.body || drop.state === 'done') return;
     if (other === 'target') {
-      // Only the hard metal head bites into blocks. A wooden handle strike
-      // just clangs off and shoves the tool away.
+      // Only the hard metal head bites into blocks, and only when it arrives
+      // with real speed. A wooden handle strike never mines.
       if (part === 'handle') this.clang(drop);
       else this.impactOnTarget(drop);
     } else if (other === 'ground') {
@@ -285,29 +290,23 @@ export class DropSystem {
     }
   }
 
-  /** Handle-first landing: bounce away, kick the spin, no destruction. */
+  /**
+   * Handle-first contact. No destruction and deliberately NO bounce impulse -
+   * the tool just scrapes and keeps sliding on its own physics, though a small
+   * spin nudge helps the head swing around for a proper bite.
+   */
   private clang(drop: ActiveDrop): void {
     drop.handleHits++;
-    if (drop.handleHits > 4) return;
+    if (drop.handleHits > 6) return;
     const t = drop.body.translation();
-    // shove it away from the target's centre and upward, with a spin kick
-    const away = TMP.set(t.x, 0, t.z);
-    if (away.lengthSq() < 1e-4) away.set(rand(-1, 1), 0, rand(-1, 1));
-    away.normalize();
-    const mass = Math.max(0.2, drop.built.mass);
-    const push = mass * (3.5 + rand(0, 2.5));
-    drop.body.applyImpulse(
-      { x: away.x * push, y: mass * 5.5, z: away.z * push },
-      true,
-    );
     const spin = drop.body.angvel();
     drop.body.setAngvel(
-      { x: spin.x, y: spin.y, z: spin.z + rand(-6, 6) },
+      { x: spin.x, y: spin.y, z: spin.z + rand(-2.2, 2.2) },
       true,
     );
-    this.ctx.audio.impact('cloth', 0.5);
-    this.ctx.fx.voxelBurst(t.x, t.y, t.z, STONE_IDX, 0.45, 0.5);
-    this.ctx.camera.addShake(0.06);
+    this.ctx.audio.impact('cloth', 0.45);
+    this.ctx.fx.voxelBurst(t.x, t.y, t.z, STONE_IDX, 0.35, 0.4);
+    this.ctx.camera.addShake(0.04);
   }
 
   /** Destruction radius in world units for the current target. */
@@ -318,16 +317,23 @@ export class DropSystem {
   }
 
   private impactOnTarget(drop: ActiveDrop): void {
-    if (drop.hasHit || drop.state === 'done') return;
-    drop.hasHit = true;
-    this.stats.targetHits++;
+    // Only a drop still in free fall may bite. Channel tools and explosives
+    // switch state on their first contact and must not re-trigger.
+    if (drop.state !== 'falling') return;
     const target = this.ctx.getTarget();
     if (!target) return;
+    const speed = drop.prevVel.length();
+    // Mining is gated on arrival speed, not on being the first touch: a
+    // pickaxe that bounces and comes back down hard enough bites again.
+    if (speed < MIN_MINE_SPEED) return;
+    if (drop.mineCooldown > 0) return;
+    drop.mineCooldown = 0.16;
+    drop.hasHit = true;
+    this.stats.targetHits++;
     drop.impactPos.copy(drop.prevTipWorld).add(drop.tipWorld).multiplyScalar(0.5);
     // Snap onto the exact block that was struck so the crater is centred on it.
     target.snapToBlock(drop.impactPos, 3);
 
-    const speed = drop.prevVel.length();
     const expected = Math.sqrt(2 * 27 * drop.def.spawnHeight * this.ctx.progression.heightMul);
     const quality = clamp(speed / Math.max(6, expected), 0.4, 1.45);
     const radius = this.radiusWorld(drop);
@@ -489,9 +495,9 @@ export class DropSystem {
    */
   private hopUp(drop: ActiveDrop): void {
     const v = drop.body.linvel();
-    // Guarantee at least a small upward hop without stacking on top of a hard
+    // Guarantee a small upward pop without stacking on top of a hard
     // restitution bounce (a heavy hit already rebounds on its own).
-    const hop = 2.4 + rand(0, 1.2);
+    const hop = 4.2 + rand(0, 1.6);
     drop.body.setLinvel({ x: v.x, y: Math.max(v.y, hop), z: 0 }, true);
     const w = drop.body.angvel();
     drop.body.setAngvel({ x: w.x, y: w.y, z: w.z + rand(-1.2, 1.2) }, true);
@@ -647,6 +653,7 @@ export class DropSystem {
       drop.built.group.quaternion.set(r.x, r.y, r.z, r.w);
       drop.tipWorld.copy(drop.built.tip).applyQuaternion(drop.built.group.quaternion).add(drop.built.group.position);
       drop.life += dt;
+      if (drop.mineCooldown > 0) drop.mineCooldown -= dt;
 
       if (drop.state === 'channel') {
         drop.channelLeft -= dt;
