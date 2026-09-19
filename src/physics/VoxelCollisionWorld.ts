@@ -2,20 +2,23 @@ import { Vector3 } from 'three';
 import { GRID_X, GRID_Y, GRID_Z } from '../destruction/builders';
 import { MATERIALS } from '../content/materials';
 import type { Target } from '../destruction/Target';
-import type { CollisionWorld, SweepHit } from './PickaxeSimulator';
+import { sweepAABB, makeSweepResult, type CollisionWorld, type SweepHit } from './PickaxeSimulator';
 
 /**
- * The pickaxe simulator only ever asks one question - "what did this segment
- * cross?" - so the whole world can live behind this class. It answers from two
- * sources:
+ * The pickaxe solver only ever asks one question - "did this sphere cross
+ * anything on its way from A to B?" - so the whole world lives behind this
+ * class. It answers from two sources:
  *
- *   1. the arena deck (an analytic horizontal plane), and
- *   2. the live voxel grid of the current target, walked with a voxel DDA
- *      (Amanatides & Woo). Nothing is tested against meshes, so a pickaxe
- *      falling fast can never tunnel: the sweep is a genuine segment query.
+ *   1. the arena deck, as a single AABB, and
+ *   2. the live voxel grid of the current target.
  *
- * If the game ever swaps voxels for something else, only this file changes -
- * the same seam is what a Luau `workspace:Raycast` version would implement.
+ * Voxel queries walk the small cell box the sweep covers, then run an exact
+ * swept-sphere vs AABB test against each occupied cell. Nothing is tested
+ * against meshes and nothing relies on "is this point inside a block", so a
+ * fast pickaxe can never tunnel and a resting one is always pushed out.
+ *
+ * Swapping voxels for something else (or `workspace:Spherecast` in a Luau port)
+ * only means replacing this file.
  */
 
 export interface VoxelCollisionWorldOptions {
@@ -23,66 +26,60 @@ export interface VoxelCollisionWorldOptions {
   groundY?: number;
   /** half extent of the deck in X/Z */
   groundHalf?: number;
+  /** deck thickness below the surface */
+  groundDepth?: number;
   /** voxel hardness that maps to resistance 1 */
   resistanceScale?: number;
-}
-
-interface GridPoint {
-  x: number;
-  y: number;
-  z: number;
 }
 
 export class VoxelCollisionWorld implements CollisionWorld {
   groundY: number;
   groundHalf: number;
+  groundDepth: number;
   resistanceScale: number;
 
-  private readonly startGrid: GridPoint = { x: 0, y: 0, z: 0 };
-  private readonly endGrid: GridPoint = { x: 0, y: 0, z: 0 };
+  private readonly deckMin = new Vector3();
+  private readonly deckMax = new Vector3();
+  private readonly cellMin = new Vector3();
+  private readonly cellMax = new Vector3();
+  private readonly result = makeSweepResult();
+  private readonly getTarget: () => Target | null;
 
-  constructor(
-    private getTarget: () => Target | null,
-    opts: VoxelCollisionWorldOptions = {},
-  ) {
+  constructor(getTarget: () => Target | null, opts: VoxelCollisionWorldOptions = {}) {
+    this.getTarget = getTarget;
     this.groundY = opts.groundY ?? 0;
     this.groundHalf = opts.groundHalf ?? 16;
+    this.groundDepth = opts.groundDepth ?? 2.6;
     this.resistanceScale = opts.resistanceScale ?? 100;
+    this.deckMin.set(-this.groundHalf, this.groundY - this.groundDepth, -this.groundHalf);
+    this.deckMax.set(this.groundHalf, this.groundY, this.groundHalf);
   }
 
-  sweepSegment(start: Vector3, end: Vector3): SweepHit | null {
-    let best = this.sweepGround(start, end);
-    const voxel = this.sweepVoxels(start, end);
-    // voxels win ties: the deck plane runs underneath the voxel floor, and a
-    // buried probe must be pushed out of the block, not through the deck
-    if (voxel && (!best || voxel.t <= best.t)) best = voxel;
+  sweepSphere(from: Vector3, to: Vector3, radius: number): SweepHit | null {
+    let best = this.sweepDeck(from, to, radius);
+    const voxel = this.sweepVoxels(from, to, radius);
+    if (voxel && (!best || voxel.t < best.t)) best = voxel;
     return best;
   }
 
-  /**
-   * Downward crossing of the arena deck plane, clipped to the deck extent. A
-   * probe already at or below the deck also reports a contact (with the point
-   * snapped to the surface) so a resting body is pushed out instead of slowly
-   * sinking through the floor one substep at a time.
-   */
-  private sweepGround(start: Vector3, end: Vector3): SweepHit | null {
-    const dy = end.y - start.y;
-    let t: number;
-    if (start.y > this.groundY) {
-      if (dy >= 0) return null;
-      t = (this.groundY - start.y) / dy;
-      if (t < 0 || t > 1) return null;
-    } else {
-      // already inside/below the deck: only the sideways extent matters
-      t = 0;
-    }
-    const px = start.x + (end.x - start.x) * t;
-    const pz = start.z + (end.z - start.z) * t;
-    if (Math.abs(px) > this.groundHalf || Math.abs(pz) > this.groundHalf) return null;
+  private sweepDeck(from: Vector3, to: Vector3, radius: number): SweepHit | null {
+    const hit = sweepAABB(
+      from,
+      to,
+      this.cellMin.set(this.deckMin.x - radius, this.deckMin.y - radius, this.deckMin.z - radius),
+      this.cellMax.set(this.deckMax.x + radius, this.deckMax.y + radius, this.deckMax.z + radius),
+      this.result,
+    );
+    if (!hit) return null;
     return {
-      t,
-      point: new Vector3(px, this.groundY, pz),
-      normal: new Vector3(0, 1, 0),
+      t: hit.t,
+      point: new Vector3(
+        from.x + (to.x - from.x) * hit.t,
+        from.y + (to.y - from.y) * hit.t,
+        from.z + (to.z - from.z) * hit.t,
+      ),
+      normal: hit.normal.clone(),
+      depth: hit.depth,
       destructible: false,
       resistance: 0,
       node: 'ground',
@@ -90,116 +87,66 @@ export class VoxelCollisionWorld implements CollisionWorld {
   }
 
   /**
-   * Voxel DDA between two world points. Returns the first solid voxel entered,
-   * with the exact entry point, the outward face normal and the material's
-   * hardness as `resistance`.
+   * Cell-box sweep: every occupied cell the swept sphere could possibly touch
+   * is tested exactly, and the earliest contact wins.
    */
-  private sweepVoxels(start: Vector3, end: Vector3): SweepHit | null {
+  private sweepVoxels(from: Vector3, to: Vector3, radius: number): SweepHit | null {
     const target = this.getTarget();
     if (!target) return null;
     const grid = target.grid;
     const vs = target.voxelSize;
 
-    const s = this.startGrid;
-    const e = this.endGrid;
-    s.x = start.x / vs + GRID_X / 2 - 0.5;
-    s.y = start.y / vs - 0.5;
-    s.z = start.z / vs + GRID_Z / 2 - 0.5;
-    e.x = end.x / vs + GRID_X / 2 - 0.5;
-    e.y = end.y / vs - 0.5;
-    e.z = end.z / vs + GRID_Z / 2 - 0.5;
+    const minX = Math.min(from.x, to.x) - radius;
+    const minY = Math.min(from.y, to.y) - radius;
+    const minZ = Math.min(from.z, to.z) - radius;
+    const maxX = Math.max(from.x, to.x) + radius;
+    const maxY = Math.max(from.y, to.y) + radius;
+    const maxZ = Math.max(from.z, to.z) + radius;
 
-    const dx = e.x - s.x;
-    const dy = e.y - s.y;
-    const dz = e.z - s.z;
-    const len = Math.hypot(dx, dy, dz);
-    // A degenerate segment (a resting body barely moves in a substep) is still a
-    // valid query: it asks "is this point inside something right now?". Keeping
-    // it means a body can never settle while buried in a block or the deck.
-    const inv = len > 1e-9 ? 1 / len : 0;
-    const dvx = dx * inv;
-    const dvy = dy * inv;
-    const dvz = dz * inv;
+    const x0 = Math.max(0, Math.floor(minX / vs + GRID_X / 2));
+    const x1 = Math.min(GRID_X - 1, Math.floor(maxX / vs + GRID_X / 2));
+    const y0 = Math.max(0, Math.floor(minY / vs));
+    const y1 = Math.min(GRID_Y - 1, Math.floor(maxY / vs));
+    const z0 = Math.max(0, Math.floor(minZ / vs + GRID_Z / 2));
+    const z1 = Math.min(GRID_Z - 1, Math.floor(maxZ / vs + GRID_Z / 2));
 
-    let ix = Math.floor(s.x);
-    let iy = Math.floor(s.y);
-    let iz = Math.floor(s.z);
-    const stepX = dvx > 0 ? 1 : -1;
-    const stepY = dvy > 0 ? 1 : -1;
-    const stepZ = dvz > 0 ? 1 : -1;
-    const tDeltaX = Math.abs(1 / (dvx || 1e-9));
-    const tDeltaY = Math.abs(1 / (dvy || 1e-9));
-    const tDeltaZ = Math.abs(1 / (dvz || 1e-9));
-    let tMaxX = dvx === 0 ? Infinity : (dvx > 0 ? ix + 1 - s.x : s.x - ix) * tDeltaX;
-    let tMaxY = dvy === 0 ? Infinity : (dvy > 0 ? iy + 1 - s.y : s.y - iy) * tDeltaY;
-    let tMaxZ = dvz === 0 ? Infinity : (dvz > 0 ? iz + 1 - s.z : s.z - iz) * tDeltaZ;
-
-    let t = 0;
-    let face = -1;
-    for (let guard = 0; guard < 512 && t <= len; guard++) {
-      if (ix >= 0 && iy >= 0 && iz >= 0 && ix < GRID_X && iy < GRID_Y && iz < GRID_Z) {
-        const cell = grid.index(ix, iy, iz);
-        if (grid.active[cell] === 1) {
+    let best: SweepHit | null = null;
+    for (let y = y0; y <= y1; y += 1) {
+      const cellMinY = y * vs;
+      for (let z = z0; z <= z1; z += 1) {
+        const cellMinZ = (z - GRID_Z / 2) * vs;
+        for (let x = x0; x <= x1; x += 1) {
+          const cell = grid.index(x, y, z);
+          if (grid.active[cell] !== 1) continue;
+          const cellMinX = (x - GRID_X / 2) * vs;
+          this.cellMin.set(cellMinX - radius, cellMinY - radius, cellMinZ - radius);
+          this.cellMax.set(
+            cellMinX + vs + radius,
+            cellMinY + vs + radius,
+            cellMinZ + vs + radius,
+          );
+          const hit = sweepAABB(from, to, this.cellMin, this.cellMax, this.result);
+          if (!hit) continue;
+          if (best && hit.t >= best.t) continue;
           const hardness = MATERIALS[grid.materialIdAt(cell)]?.hardness ?? 10;
-          const resistance = Math.min(1, Math.max(0.05, hardness / this.resistanceScale));
-          const normal = new Vector3();
-          if (face === 0) normal.set(-stepX, 0, 0);
-          else if (face === 1) normal.set(0, -stepY, 0);
-          else if (face === 2) normal.set(0, 0, -stepZ);
-          else {
-            // The sweep started inside a solid voxel: a crater exposed a
-            // neighbour, or the body settled into the surface. Always eject
-            // through the TOP face. Any other choice can drive a buried probe
-            // deeper (or through the deck under the floor), and a buried probe
-            // that is never pushed out keeps its velocity, tunnels and runs
-            // away. Combined with the normal impulse this pops the pickaxe back
-            // onto the surface, which is exactly what the player expects.
-            const gy = s.y + dvy * t;
-            const rise = (iy + 1 - gy) * vs;
-            return {
-              t: 0,
-              point: new Vector3(start.x, start.y + Math.min(0.6 * vs, rise), start.z),
-              normal: new Vector3(0, 1, 0),
-              destructible: true,
-              resistance,
-              voxelCenter: target.worldOf(cell, new Vector3()),
-              voxelId: cell,
-              node: target,
-            };
-          }
-          return {
-            t: len > 1e-9 ? t / len : 0,
+          best = {
+            t: hit.t,
             point: new Vector3(
-              (s.x + dvx * t - GRID_X / 2 + 0.5) * vs,
-              (s.y + dvy * t + 0.5) * vs,
-              (s.z + dvz * t - GRID_Z / 2 + 0.5) * vs,
+              from.x + (to.x - from.x) * hit.t,
+              from.y + (to.y - from.y) * hit.t,
+              from.z + (to.z - from.z) * hit.t,
             ),
-            normal,
+            normal: hit.normal.clone(),
+            depth: hit.depth,
             destructible: true,
-            resistance,
+            resistance: Math.min(1, Math.max(0.05, hardness / this.resistanceScale)),
             voxelCenter: target.worldOf(cell, new Vector3()),
             voxelId: cell,
             node: target,
           };
         }
       }
-      if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
-        ix += stepX;
-        t = tMaxX;
-        tMaxX += tDeltaX;
-        face = 0;
-      } else if (tMaxY <= tMaxZ) {
-        iy += stepY;
-        t = tMaxY;
-        tMaxY += tDeltaY;
-        face = 1;
-      } else {
-        iz += stepZ;
-        t = tMaxZ;
-        tMaxZ += tDeltaZ;
-        face = 2;
-      }
     }
-    return null;
+    return best;
   }
 }

@@ -1,14 +1,10 @@
 /**
- * Solver contract test for the hand-written pickaxe simulation.
+ * Planar contract test for the hand-written pickaxe simulation.
  *
- * The pickaxes used to be planar rigid bodies (X/Y translation, Z-only spin).
- * They are now true 3D bodies driven by `PickaxeSimulator`, so this test checks
- * the contract that replaced it:
- *
- *   - no NaN / Infinity anywhere in the state
- *   - angular velocity stays inside the configured clamp
- *   - the tool never sinks through the arena deck or the lab floor
- *   - every dropped pickaxe eventually settles and falls asleep
+ * Ported from the Pickaxe Drop Astra constraints: a dropped pickaxe must stay in
+ * its interaction plane no matter what - no depth drift, no depth velocity, no
+ * rotation about any axis other than the plane normal - while still tumbling,
+ * mining and settling.
  *
  * Usage: node tools/planartest.mjs [url] [tool]
  */
@@ -55,30 +51,41 @@ await page.evaluate(([n, t]) => window.__game.dev.dropMany(n, t), [COUNT, TOOL])
 let nan = false;
 let maxSpin = 0;
 let minY = Infinity;
+let maxLane = 0;
+let maxVz = 0;
 let maxSpeed = 0;
-const maxAngular = (await page.evaluate(() => window.__game.dev.tuning())).maxAngularVelocity;
+const tuning = await page.evaluate(() => window.__game.dev.tuning());
 
-for (let i = 0; i < 40; i++) {
+for (let i = 0; i < 60; i += 1) {
   await sleep(250);
   const info = await page.evaluate(() => window.__game.dev.simInfo());
   for (const d of info.drops) {
-    if (![d.speed, d.spin, d.x, d.y, d.z].every(Number.isFinite)) nan = true;
-    maxSpin = Math.max(maxSpin, d.spin);
+    if (![d.speed, d.spin, d.x, d.y, d.z, d.lane, d.vz].every(Number.isFinite)) nan = true;
+    maxSpin = Math.max(maxSpin, Math.abs(d.spin));
     maxSpeed = Math.max(maxSpeed, d.speed);
     minY = Math.min(minY, d.y);
+    maxLane = Math.max(maxLane, Math.abs(d.lane));
+    maxVz = Math.max(maxVz, Math.abs(d.vz));
   }
-  if (i > 24 && info.drops.every((d) => d.sleeping || d.stuck)) break;
+  if (i > 40 && info.drops.every((d) => d.sleeping)) break;
 }
 
 const final = await page.evaluate(() => window.__game.dev.simInfo());
-const awake = final.drops.filter((d) => !d.sleeping && !d.stuck).length;
+const awake = final.drops.filter((d) => !d.sleeping).length;
 
 console.log(`tool: ${TOOL}   dropped: ${COUNT}   probes/body: ${final.probesPerBody}`);
-console.log(`max speed: ${maxSpeed.toFixed(1)}   max spin: ${maxSpin.toFixed(2)} (clamp ${maxAngular})`);
-console.log(`lowest y reached: ${minY.toFixed(2)}   still awake at end: ${awake} / ${final.drops.length}`);
-const ok = !nan && maxSpin <= maxAngular + 1e-6 && maxSpeed <= 200 && minY > -3 && awake === 0;
-console.log(`NaN: ${nan}   spin within clamp: ${maxSpin <= maxAngular + 1e-6}   above deck: ${minY > -3}   all settled: ${awake === 0}`);
-console.log(ok ? 'PASS: 3D solver stays bounded and settles' : 'FAIL: solver contract violated');
+console.log(`max speed: ${maxSpeed.toFixed(1)}   max |spin|: ${maxSpin.toFixed(2)} (clamp ${tuning.maxAngularVelocity})`);
+console.log(`lowest y reached: ${minY.toFixed(2)}   still awake: ${awake} / ${final.drops.length}`);
+console.log(`max |z - plane|: ${maxLane.toExponential(2)} (lane ${final.drops[0]?.halfDepth ?? '-'})   max |vz|: ${maxVz.toExponential(2)}`);
+const ok =
+  !nan &&
+  maxSpin <= tuning.maxAngularVelocity + 1e-6 &&
+  maxVz < 1e-6 &&
+  maxLane <= (final.drops[0]?.halfDepth ?? 1) + 1e-6 &&
+  minY > -0.3 &&
+  awake === 0;
+console.log(`NaN: ${nan}   spin in clamp: ${ok || maxSpin <= tuning.maxAngularVelocity + 1e-6}   depth lock: ${maxVz < 1e-6}`);
+console.log(ok ? 'PASS: planar solver stays in its plane and settles' : 'FAIL: planar contract violated');
 console.log(`errors (${errors.length})`);
 for (const e of errors.slice(0, 8)) console.log(e);
 await browser.close();

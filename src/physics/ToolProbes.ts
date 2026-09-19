@@ -3,19 +3,23 @@ import type { ToolDef } from '../content/tools';
 import type { CollisionProbe, ProbeKind } from './PickaxeSimulator';
 
 /**
- * Collision probes are sampled straight off the tool's authored parts, so the
- * physics shape always matches the model. The pickaxe spec asked for a handful
- * of named points (HEAD_LEFT / HEAD_CENTER / HEAD_RIGHT / HANDLE_END); this
- * builds a denser cloud and then *names* the semantic extremes so both the
- * debug view and impact classification can talk about the same landmarks.
- *
- * A box contributes its 8 corners plus a centre point: for a translating body
- * the corners are exactly the first points to cross a voxel face, so a sweep
- * over them is a true swept test, not an approximation.
+ * Collision probes are sampled from the tool's authored parts, so the physics
+ * silhouette matches the model, then reduced to a small sparse set: the solver
+ * sweeps a sphere along every probe each substep, so the count is the frame
+ * budget. Landmarks the design doc calls out (HEAD_LEFT / HEAD_CENTER /
+ * HEAD_RIGHT / HANDLE_MIDDLE / HANDLE_END) are always kept; the rest of the
+ * cloud is filled in from the extremities inwards.
  */
 
 /** same rule the collider builder uses to decide which parts mine */
 const HEAD_DENSITY = 1200;
+
+export interface ProbeOptions {
+  /** hard cap on probes per tool */
+  maxProbes?: number;
+  /** minimum distance between kept probes, in world units */
+  minSeparation?: number;
+}
 
 function sampleShape(kind: string, size: number[], out: Vector3[]): void {
   const sx = size[0] ?? 0;
@@ -26,13 +30,7 @@ function sampleShape(kind: string, size: number[], out: Vector3[]): void {
     const hy = sy / 2;
     const hz = sz / 2;
     for (let i = 0; i < 8; i++) {
-      out.push(
-        new Vector3(
-          i & 1 ? hx : -hx,
-          i & 2 ? hy : -hy,
-          i & 4 ? hz : -hz,
-        ),
-      );
+      out.push(new Vector3(i & 1 ? hx : -hx, i & 2 ? hy : -hy, i & 4 ? hz : -hz));
     }
     out.push(new Vector3(0, 0, 0));
     return;
@@ -77,7 +75,9 @@ function sampleShape(kind: string, size: number[], out: Vector3[]): void {
   out.push(new Vector3(0, 0, 0));
 }
 
-export function buildToolProbes(def: ToolDef, scale: number): CollisionProbe[] {
+export function buildToolProbes(def: ToolDef, scale: number, opts: ProbeOptions = {}): CollisionProbe[] {
+  const maxProbes = opts.maxProbes ?? 14;
+  const minSeparation = opts.minSeparation ?? 0.24 * scale;
   const probes: CollisionProbe[] = [];
   const seen = new Set<string>();
   const quat = new Quaternion();
@@ -108,11 +108,12 @@ export function buildToolProbes(def: ToolDef, scale: number): CollisionProbe[] {
     }
   }
 
-  return nameLandmarks(probes);
+  nameLandmarks(probes);
+  return selectSparse(probes, maxProbes, minSeparation);
 }
 
 /** Give the extreme probes the names the design doc calls out. */
-function nameLandmarks(probes: CollisionProbe[]): CollisionProbe[] {
+function nameLandmarks(probes: CollisionProbe[]): void {
   const heads = probes.filter((p) => p.kind === 'head');
   const handles = probes.filter((p) => p.kind === 'handle');
   if (heads.length) {
@@ -152,11 +153,45 @@ function nameLandmarks(probes: CollisionProbe[]): CollisionProbe[] {
     }
     middle.name = 'HANDLE_MIDDLE';
   }
-  return probes;
+}
+
+/**
+ * Keep the named landmarks, then fill up with the most extreme points that are
+ * far enough apart to add coverage. Order matters: the first accepted probe in
+ * each direction defines the silhouette.
+ */
+function selectSparse(probes: CollisionProbe[], max: number, minSeparation: number): CollisionProbe[] {
+  const named = probes.filter((p) => p.name.startsWith('HEAD_') || p.name.startsWith('HANDLE_'));
+  const landmarkNames = new Set(['HEAD_LEFT', 'HEAD_CENTER', 'HEAD_RIGHT', 'HANDLE_MIDDLE', 'HANDLE_END']);
+  const kept: CollisionProbe[] = [];
+  for (const p of named) {
+    if (landmarkNames.has(p.name)) kept.push(p);
+  }
+  if (!kept.length && probes.length) kept.push(probes[0]);
+
+  const centroid = avg(probes);
+  const rest = probes
+    .filter((p) => kept.indexOf(p) < 0)
+    .sort(
+      (a, b) => b.local.distanceToSquared(centroid) - a.local.distanceToSquared(centroid),
+    );
+  const minSq = minSeparation * minSeparation;
+  for (const p of rest) {
+    if (kept.length >= max) break;
+    let ok = true;
+    for (const k of kept) {
+      if (k.local.distanceToSquared(p.local) < minSq) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) kept.push(p);
+  }
+  return kept;
 }
 
 function avg(list: CollisionProbe[]): Vector3 {
   const out = new Vector3();
   for (const p of list) out.add(p.local);
-  return out.multiplyScalar(1 / list.length);
+  return out.multiplyScalar(1 / Math.max(1, list.length));
 }

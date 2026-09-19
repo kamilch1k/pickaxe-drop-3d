@@ -79,17 +79,17 @@ for (let i = 0; i < 26; i++) {
     maxSpin = Math.max(maxSpin, d.spin);
     maxSpeed = Math.max(maxSpeed, d.speed);
     minY = Math.min(minY, d.y);
-    if (d.sleeping || d.stuck) settled++;
+    if (d.sleeping) settled++;
   }
   for (const d of snap.drops) {
-    if (d.state === 'falling') maxOffAxis = Math.max(maxOffAxis, Math.hypot(d.vx, d.vz));
+    if (d.state === 'falling') maxOffAxis = Math.max(maxOffAxis, Math.abs(d.vz));
   }
   timeline.push({
     t: i * 0.25,
     live: snap.info.bodies,
     left: snap.left,
     sleeping: snap.info.drops.filter((d) => d.sleeping).length,
-    stuck: snap.info.drops.filter((d) => d.stuck).length,
+    stuck: 0,
     topSpeed: Math.max(0, ...snap.info.drops.map((d) => d.speed)),
     topSpin: Math.max(0, ...snap.info.drops.map((d) => d.spin)),
     lowest: snap.info.drops.length ? Math.min(...snap.info.drops.map((d) => d.y)) : null,
@@ -121,7 +121,7 @@ console.log(`draw calls: ${after.perf.calls}  triangles: ${after.perf.triangles}
 console.log(`bodies below the deck surface (y<0.15): ${buried.length}`);
 for (const b of buried) {
   console.log(
-    `  y=${b.y} x=${b.x} z=${b.z} vy=${b.vy} vh=${b.vh} spin=${b.spin} sleep=${b.sleeping} contact=[${b.contact}]`,
+    `  y=${b.y} x=${b.x} z=${b.z} vy=${b.vy} lane=${b.lane} spin=${b.spin} sleep=${b.sleeping} contact=[${b.contact}]`,
   );
 }
 console.log('tune:', JSON.stringify(tuning));

@@ -1,11 +1,9 @@
 /**
- * Penetration contract: destroying a block must NOT stop the pickaxe dead.
- * After every mining hit the tool should still be carrying real speed, either
- * continuing through the crater (penetration) or rebounding off it (bounce).
+ * Break-rebound contract (the Astra "hop"): smashing a block must kick the
+ * pickaxe out of the crater instead of letting it drill down the column.
  *
- * This replaces the old "hop" test: the artificial upward pop after a bite was
- * removed with the Rapier path, and the hand-written solver produces the motion
- * from restitution + penetration instead.
+ * Watches the newest drop around each mining hit and reports the upward speed
+ * right after the bite and whether it actually rose afterwards.
  *
  * Usage: node tools/hoptest.mjs [url] [tool] [drops]
  */
@@ -13,7 +11,7 @@ import puppeteer from 'puppeteer-core';
 
 const URL = process.argv[2] ?? 'http://localhost:5177/';
 const TOOL = process.argv[3] ?? 'wooden';
-const DROPS = Number(process.argv[4] ?? 20);
+const DROPS = Number(process.argv[4] ?? 18);
 const CHROME =
   process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -49,49 +47,59 @@ await page.evaluate((t) => {
 }, TOOL);
 await sleep(400);
 
-let hits = 0;
-let moving = 0;
-let minSpeedAfter = Infinity;
-let sumSpeedAfter = 0;
 
-for (let i = 0; i < DROPS; i++) {
-  const before = await page.evaluate(() => window.__game.dropStats.targetHits);
+
+let hits = 0;
+let hopped = 0;
+let minVyAfter = Infinity;
+let bestRise = 0;
+
+for (let i = 0; i < DROPS; i += 1) {
+  const before = await page.evaluate(() => window.__game.dev.simInfo().broken);
   const p = await page.evaluate(() => window.__game.dev.aimRandom());
   if (!p) {
-    await sleep(350);
+    await sleep(300);
     continue;
   }
   await page.mouse.move(Math.round(p.x), Math.round(p.y));
   await page.mouse.click(Math.round(p.x), Math.round(p.y));
 
-  // sample the newest drop right after the bite lands
-  let speed = 0;
-  for (let s = 0; s < 16; s++) {
-    await sleep(70);
-    const hitNow = await page.evaluate(() => window.__game.dropStats.targetHits);
-    if (hitNow > before) {
-      const d = await page.evaluate(() => {
-        const l = window.__game.dev.dropInfo();
-        return l && l.length ? l.reduce((a, b) => (b.id > a.id ? b : a), l[0]) : null;
-      });
-      speed = d ? d.speed : 0;
-      break;
-    }
+  // One drop at a time: the newest body is the only one that can bite here.
+  let lowest = Infinity;
+  let highest = -Infinity;
+  let peakVy = -Infinity;
+  let broke = false;
+  for (let s = 0; s < 60; s += 1) {
+    await sleep(60);
+    const snap = await page.evaluate(() => window.__game.dev.simInfo());
+    const d = snap.drops[snap.drops.length - 1];
+    if (!d) break;
+    if (snap.broken > before) broke = true;
+    if (!broke) continue;
+    lowest = Math.min(lowest, d.y);
+    highest = Math.max(highest, d.y);
+    peakVy = Math.max(peakVy, d.vy);
   }
-  if (speed > 0) {
-    hits++;
-    sumSpeedAfter += speed;
-    minSpeedAfter = Math.min(minSpeedAfter, speed);
-    if (speed > 1.5) moving++;
-    console.log(`  drop ${i + 1}: speed right after the bite ${speed.toFixed(2)} m/s`);
+  if (broke) {
+    const rise = Math.max(0, highest - lowest);
+    hits += 1;
+    minVyAfter = Math.min(minVyAfter, peakVy);
+    if (rise > 0.25 || peakVy > 3) hopped += 1;
+    bestRise = Math.max(bestRise, rise);
+    console.log(
+      `  drop ${i + 1}: rose ${rise.toFixed(2)} m after the bite, peak vy ${peakVy.toFixed(2)} m/s`,
+    );
+  } else {
+    console.log(`  drop ${i + 1}: no bite`);
   }
+  await sleep(600);
 }
 
-console.log(`\ntool ${TOOL}: ${hits} bites measured`);
+console.log(`\ntool ${TOOL}: ${hits} bites observed`);
 if (hits) {
-  console.log(`  avg speed after a bite: ${(sumSpeedAfter / hits).toFixed(2)} m/s`);
-  console.log(`  slowest after a bite ...: ${minSpeedAfter.toFixed(2)} m/s`);
-  console.log(`  still moving (>1.5 m/s): ${moving}/${hits}`);
+  console.log(`  kicked upward (>3 m/s): ${hopped}/${hits}`);
+  console.log(`  slowest rebound: ${minVyAfter.toFixed(2)} m/s`);
+  console.log(`  largest rise after a bite: ${bestRise.toFixed(2)} m`);
 }
 console.log(`errors (${errors.length})`);
 for (const e of errors.slice(0, 6)) console.log(e);

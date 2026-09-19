@@ -121,19 +121,10 @@ function usesSolver(def: ToolDef): boolean {
   return def.kind === 'pickaxe';
 }
 
-/** How much each impact classification multiplies the tool's crater damage. */
-const QUALITY_MULT: Record<ImpactQuality, number> = {
-  PERFECT_HEAD_HIT: 2.4,
-  HEAD_HIT: 1.35,
-  SIDE_HIT: 0.5,
-  GLANCING_HIT: 0.25,
-  HANDLE_HIT: 0.08,
-};
+/** Fraction of the tool's damage a side-face scuff is worth. */
+const SIDE_CHIP_DAMAGE = 0.3;
 const PERFECT: ImpactQuality = 'PERFECT_HEAD_HIT';
-/** Minimum seconds between two mining bites from the same drop. */
-const MINE_COOLDOWN = 0.085;
-/** How long a stuck / sleeping pickaxe stays in the arena before fading. */
-const STICK_LINGER = 3.4;
+/** How long a stopped pickaxe stays in the arena before it fades. */
 const STOP_LINGER = 1.8;
 
 export class DropSystem {
@@ -160,8 +151,8 @@ export class DropSystem {
       this.tuning,
       {
         onImpact: (event) => this.onSimImpact(event),
+        onVoxelDamage: (event) => this.onSimVoxelDamage(event),
         onVoxelDestroyed: (event) => this.onSimVoxelDestroyed(event),
-        onPickaxeStick: (body) => this.onSimStick(body),
         onPickaxeStop: (body) => this.onSimStop(body),
       },
     );
@@ -234,16 +225,12 @@ export class DropSystem {
     const y = height + rand(-0.3, 0.6);
     built.group.position.set(x, y, z);
 
-    // Spawn orientation. Solver-driven pickaxes are released roughly head-down -
-    // the heavy end leads, like a real dropped tool - but with a wide random
-    // tilt so every drop still tumbles differently. Engine tools keep the
-    // authoring-plane orientation they were tuned with.
+    // Spawn orientation. Solver-driven pickaxes live in the vertical plane they
+    // were aimed at: the blade always faces the camera and only spins about Z.
+    // Released a little past head-down with a slow tumble, like Astra.
     const q = QUAT;
     if (usesSolver(def)) {
-      const dir = new THREE.Vector3(rand(-1, 1), -rand(0.45, 1), rand(-1, 1)).normalize();
-      q.setFromUnitVectors(UP, dir);
-      QUAT2.setFromAxisAngle(UP, rand(0, Math.PI * 2));
-      q.multiply(QUAT2).normalize();
+      q.setFromAxisAngle(FORWARD, Math.PI + 0.45 + rand(-0.9, 0.9));
     } else {
       const mode = def.spinMode;
       if (mode === 'planar') {
@@ -306,7 +293,8 @@ export class DropSystem {
 
   /**
    * Hand-written solver path. No Rapier body, no colliders: the pickaxe is a
-   * `PickaxeBody` and the mesh is purely a visual transform the solver writes.
+   * `PickaxeBody` locked to its drop plane, and the mesh is purely a visual
+   * transform the solver writes (with interpolation between fixed steps).
    */
   private spawnSolverBody(
     drop: ActiveDrop,
@@ -317,28 +305,20 @@ export class DropSystem {
     z: number,
     q: THREE.Quaternion,
   ): void {
-    const body = new PickaxeBody(built.group, built.probes, this.tuning);
+    const body = new PickaxeBody(built.group, built.probes, this.tuning, def.scale);
     body.position.set(x, y, z);
+    body.planeZ = z;
     body.orientation.copy(q).normalize();
-    body.velocity.set(rand(-0.6, 0.6), -2.5, rand(-0.6, 0.6));
-    body.gravityScale = def.gravityScale;
-    // per-tool character: bouncy tools bounce, dead ones thud
-    body.restitutionScale = clamp(def.restitution / 0.22, 0.5, 1.6);
+    body.velocity.set(rand(-0.5, 0.5), 0, 0);
     body.linearDrag = def.linearDamping;
     body.angularDrag = def.angularDamping;
     body.userData.drop = drop;
 
-    // Random tumble: random axis, magnitude inside the configured range, scaled
-    // slightly by the tool so heavy hitters spin a touch slower.
-    const axis = new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1));
-    if (axis.lengthSq() < 1e-4) axis.set(1, 0, 0);
-    axis.normalize();
-    const style = clamp(def.spin / 4.4, 0.7, 1.3);
+    // Slow end-over-end tumble; the sign varies so drops do not mirror each other.
     const spin =
       rand(this.tuning.initialSpinMin, this.tuning.initialSpinMax) *
-      (Math.random() < 0.5 ? 1 : -1) *
-      style;
-    body.angularVelocity.copy(axis).multiplyScalar(spin);
+      (Math.random() < 0.5 ? 1 : -1);
+    body.angularVelocity.set(0, 0, spin);
 
     drop.sim = body;
     this.sim.add(body);
@@ -457,45 +437,61 @@ export class DropSystem {
     this.ctx.camera.addShake(power * (event.probeKind === 'head' ? 0.3 : 0.12));
   }
 
+  /** A contact that scuffs but does not bite: dust and a soft tick. */
+  private onSimVoxelDamage(event: ImpactEvent): void {
+    const drop = event.body.userData.drop as ActiveDrop | undefined;
+    if (!drop || drop.state === 'done' || event.normalSpeed < 1.5) return;
+    if (!event.side) return;
+    this.ctx.audio.impact('stone', 0.22);
+    this.ctx.fx.sparks.emit({
+      x: event.point.x,
+      y: event.point.y,
+      z: event.point.z,
+      count: 4,
+      dir: UP,
+      spread: 0.8,
+      speedMin: 2,
+      speedMax: 6,
+      sizeMin: 0.04,
+      sizeMax: 0.09,
+      lifeMin: 0.12,
+      lifeMax: 0.3,
+      gravity: -16,
+      drag: 1,
+      colors: [0xffd07a, 0xffffff],
+      alpha: 1,
+    });
+  }
+
   /**
-   * The solver has decided the struck block should break; the game owns the
-   * actual crater. Returning false vetoes the destruction, which makes the
-   * solver treat the block as solid (bounce or stick instead of penetrating).
+   * A damaging head contact: the game owns destruction. It carves its crater
+   * (or a single-block scuff for a side hit) and reports whether a block died,
+   * which makes the solver rebound and hop the pickaxe out of the crater.
    */
   private onSimVoxelDestroyed(event: ImpactEvent): boolean {
     const drop = event.body.userData.drop as ActiveDrop | undefined;
     if (!drop || drop.state !== 'falling') return false;
-    if (drop.mineCooldown > 0) return false;
     const target = this.ctx.getTarget();
     if (!target) return false;
 
-    const quality = QUALITY_MULT[event.quality] ?? 1;
-    const crit = event.quality === PERFECT;
-    const radius = this.radiusWorld(drop) * (crit ? 1.3 : 1);
-    const res = this.applyImpact(
-      drop,
-      event.voxelCenter ?? event.point,
-      radius,
-      drop.def.damage * quality,
-      crit,
-    );
+    const pos = event.voxelCenter ?? event.point;
+    const crit = !event.side && event.quality === PERFECT;
+    const res = event.side
+      ? // side scuff: one block at most, chipped rather than blasted
+        this.applyImpact(
+          drop,
+          pos,
+          this.radiusWorld(drop, 0.6),
+          drop.def.damage * SIDE_CHIP_DAMAGE,
+          false,
+          1,
+        )
+      : this.applyImpact(drop, pos, this.radiusWorld(drop), drop.def.damage, crit);
     if (!res || !res.destroyed.length) return false;
 
-    drop.mineCooldown = MINE_COOLDOWN;
     drop.hasHit = true;
     this.stats.targetHits++;
     return true;
-  }
-
-  private onSimStick(body: PickaxeBody): void {
-    const drop = body.userData.drop as ActiveDrop | undefined;
-    if (!drop) return;
-    drop.stuck = true;
-    drop.restTimer = STICK_LINGER;
-    drop.impactPos.copy(body.position);
-    this.ctx.audio.impact('metal', 0.9);
-    this.ctx.fx.voxelBurst(body.position.x, body.position.y, body.position.z, STONE_IDX, 0.6, 0.8);
-    this.ctx.camera.addShake(0.14);
   }
 
   private onSimStop(body: PickaxeBody): void {
@@ -658,22 +654,23 @@ export class DropSystem {
     radius: number,
     damage: number,
     crit: boolean,
+    maxBlocks = drop.def.maxBlocks,
   ): DamageResult | null {
     const target = this.ctx.getTarget();
     if (!target) return null;
     const prog = this.ctx.progression;
     const finalRadius = radius * (crit ? 1.4 : 1);
     const finalDamage = damage * prog.damageMul * (crit ? 2.1 : 1);
-    // Solver-driven pickaxes tumble in full 3D, so their craters are round;
-    // the planar engine tools keep the flattened bite they were tuned with.
-    const flatten = drop.sim || drop.def.spinMode === 'free' ? 1 : PLANE_FLATTEN;
+    // Planar tools bite a flat crater: the blade is only ~a third of a block
+    // thick, so a spherical crater would carve blocks it never touched.
+    const flatten = drop.sim || drop.def.spinMode !== 'free' ? PLANE_FLATTEN : 1;
     const res = target.damage(
       pos,
       finalRadius,
       finalDamage,
       900,
       0,
-      drop.def.maxBlocks,
+      maxBlocks,
       flatten,
     );
 
@@ -874,12 +871,13 @@ export class DropSystem {
         const body = drop.sim;
         drop.prevVel.copy(body.velocity);
         drop.prevTipWorld.copy(drop.tipWorld);
-        drop.built.group.position.copy(body.position);
-        drop.built.group.quaternion.copy(body.orientation);
+        // the solver already wrote the interpolated transform onto the mesh
+        drop.built.group.position.copy(body.renderPosition);
+        drop.built.group.quaternion.copy(body.renderOrientation);
         drop.tipWorld
           .copy(drop.built.tip)
-          .applyQuaternion(body.orientation)
-          .add(body.position);
+          .applyQuaternion(body.renderOrientation)
+          .add(body.renderPosition);
         drop.life += dt;
         if (drop.mineCooldown > 0) drop.mineCooldown -= dt;
         if (drop.restTimer > 0) {

@@ -69,12 +69,13 @@ const after = await page.evaluate(() => ({
   voxels: window.__game.remainingVoxels,
   hits: window.__game.dropStats.targetHits,
   qualities: window.__game.dev.simInfo().qualities,
-  probeKinds: window.__game.dev.simInfo().probeKinds,
+  probeKinds: window.__game.dev.simInfo().byKind,
   firstKinds: window.__game.dev.simInfo().firstKinds,
-  firstQualities: window.__game.dev.simInfo().firstQualities,
-  firstVoxelKinds: window.__game.dev.simInfo().firstVoxelKinds,
-  firstVoxelQualities: window.__game.dev.simInfo().firstVoxelQualities,
-  contacts: window.__game.dev.simInfo().contacts,
+  stats: {
+    head: window.__game.dev.simInfo().head,
+    handleContacts: window.__game.dev.simInfo().handleContacts,
+    broken: window.__game.dev.simInfo().broken,
+  },
   drops: window.__game.dev.dropInfo(),
 }));
 
@@ -84,35 +85,27 @@ const pct = (k) => (total ? ((q[k] ?? 0) / total) * 100 : 0);
 const kinds = after.probeKinds ?? {};
 const kindTotal = Object.values(kinds).reduce((a, b) => a + b, 0) || 1;
 const fk = after.firstKinds ?? {};
-const fq = after.firstQualities ?? {};
 const fTotal = Object.values(fk).reduce((a, b) => a + b, 0) || 1;
 console.log(`target ${LAB ? 'lab' : TARGET}   tool ${TOOL}   drops ${DROPS}`);
 console.log(`mining impacts: ${after.hits - before.hits}   blocks destroyed: ${before.voxels - after.voxels}`);
-console.log(`contacts: ${after.contacts}   classified impacts: ${total}   first contacts: ${fTotal}`);
 console.log(
-  `  all impacts: PERFECT ${pct('PERFECT_HEAD_HIT').toFixed(1)}%  HEAD ${pct('HEAD_HIT').toFixed(1)}%  SIDE ${pct('SIDE_HIT').toFixed(1)}%  GLANCE ${pct('GLANCING_HIT').toFixed(1)}%  HANDLE ${pct('HANDLE_HIT').toFixed(1)}%`,
+  `solver: strikes ${after.stats.head}   handle contacts ${after.stats.handleContacts}   blocks broken by the solver ${after.stats.broken}`,
+);
+console.log(`classified strikes: ${total}`);
+console.log(
+  `  all strikes: PERFECT ${pct('PERFECT_HEAD_HIT').toFixed(1)}%  HEAD ${pct('HEAD_HIT').toFixed(1)}%  SIDE ${pct('SIDE_HIT').toFixed(1)}%  GLANCE ${pct('GLANCING_HIT').toFixed(1)}%`,
 );
 console.log(
-  `  all probes: HEAD ${(((kinds.head ?? 0) / kindTotal) * 100).toFixed(1)}%  HANDLE ${(((kinds.handle ?? 0) / kindTotal) * 100).toFixed(1)}%`,
+  `  strike probes: HEAD ${(((kinds.head ?? 0) / kindTotal) * 100).toFixed(1)}%  HANDLE ${(((kinds.handle ?? 0) / kindTotal) * 100).toFixed(1)}%`,
 );
 console.log(
-  `  FIRST contact: HEAD ${(((fk.head ?? 0) / fTotal) * 100).toFixed(1)}%  HANDLE ${(((fk.handle ?? 0) / fTotal) * 100).toFixed(1)}%`,
-);
-console.log(
-  `  FIRST quality: PERFECT ${(((fq.PERFECT_HEAD_HIT ?? 0) / fTotal) * 100).toFixed(1)}%  HEAD ${(((fq.HEAD_HIT ?? 0) / fTotal) * 100).toFixed(1)}%  SIDE ${(((fq.SIDE_HIT ?? 0) / fTotal) * 100).toFixed(1)}%  GLANCE ${(((fq.GLANCING_HIT ?? 0) / fTotal) * 100).toFixed(1)}%  HANDLE ${(((fq.HANDLE_HIT ?? 0) / fTotal) * 100).toFixed(1)}%`,
-);
-const vk = after.firstVoxelKinds ?? {};
-const vq = after.firstVoxelQualities ?? {};
-const vTotal = Object.values(vk).reduce((a, b) => a + b, 0) || 1;
-console.log(
-  `  FIRST VOXEL: HEAD ${(((vk.head ?? 0) / vTotal) * 100).toFixed(1)}%  HANDLE ${(((vk.handle ?? 0) / vTotal) * 100).toFixed(1)}%   quality: PERFECT ${(((vq.PERFECT_HEAD_HIT ?? 0) / vTotal) * 100).toFixed(1)}%  HEAD ${(((vq.HEAD_HIT ?? 0) / vTotal) * 100).toFixed(1)}%  SIDE ${(((vq.SIDE_HIT ?? 0) / vTotal) * 100).toFixed(1)}%  GLANCE ${(((vq.GLANCING_HIT ?? 0) / vTotal) * 100).toFixed(1)}%  HANDLE ${(((vq.HANDLE_HIT ?? 0) / vTotal) * 100).toFixed(1)}%`,
+  `  first strike: HEAD ${(((fk.head ?? 0) / fTotal) * 100).toFixed(1)}%  HANDLE ${(((fk.handle ?? 0) / fTotal) * 100).toFixed(1)}%`,
 );
 const headish = pct('PERFECT_HEAD_HIT') + pct('HEAD_HIT');
-console.log(`head-ish impacts: ${headish.toFixed(1)}%`);
-const stuck = after.drops.filter((d) => d.stuck).length;
+console.log(`head-ish strikes: ${headish.toFixed(1)}%`);
 const asleep = after.drops.filter((d) => d.sleep).length;
 const mined = after.drops.filter((d) => d.hasHit).length;
-console.log(`live drops: ${after.drops.length}  stuck: ${stuck}  asleep: ${asleep}  ever mined: ${mined}`);
+console.log(`live drops: ${after.drops.length}  asleep: ${asleep}  ever mined: ${mined}`);
 console.log(`errors (${errors.length})`);
 for (const e of errors.slice(0, 8)) console.log(e);
 await browser.close();

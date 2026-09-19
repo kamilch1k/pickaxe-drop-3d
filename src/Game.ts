@@ -232,28 +232,28 @@ export class Game {
           return { ...this.drops.tuning };
         },
         simInfo: () => {
-          const bodies = this.drops.simulator.all;
+          const sim = this.drops.simulator;
+          const bodies = sim.all;
           return {
             bodies: bodies.length,
             probesPerBody: bodies.length ? bodies[0].probes.length : 0,
-            contacts: this.drops.simulator.debug.contacts,
-            contactKinds: this.drops.simulator.debug.contactKinds,
-            qualities: this.drops.simulator.debug.qualities,
-            probeKinds: this.drops.simulator.debug.probeKinds,
-            firstKinds: this.drops.simulator.debug.firstKinds,
-            firstQualities: this.drops.simulator.debug.firstQualities,
-            firstVoxelKinds: this.drops.simulator.debug.firstVoxelKinds,
-            firstVoxelQualities: this.drops.simulator.debug.firstVoxelQualities,
+            head: sim.stats.head,
+            handleContacts: sim.stats.handleContacts,
+            broken: sim.stats.broken,
+            byKind: sim.debug.byKind,
+            qualities: sim.debug.qualities,
+            firstKinds: sim.debug.firstKinds,
             drops: bodies.map((b) => ({
               speed: Number(b.velocity.length().toFixed(2)),
-              spin: Number(b.angularVelocity.length().toFixed(2)),
+              spin: Number(b.angularVelocity.z.toFixed(2)),
               sleeping: b.sleeping,
-              stuck: b.stuck,
               y: Number(b.position.y.toFixed(2)),
               x: Number(b.position.x.toFixed(2)),
-              z: Number(b.position.z.toFixed(2)),
+              z: Number(b.position.z.toFixed(3)),
+              lane: Number((b.position.z - b.planeZ).toFixed(3)),
+              halfDepth: Number(b.halfDepth.toFixed(3)),
               vy: Number(b.velocity.y.toFixed(2)),
-              vh: Number(Math.hypot(b.velocity.x, b.velocity.z).toFixed(2)),
+              vz: Number(b.velocity.z.toFixed(3)),
               contact: `${b.lastContact.probe}:${b.lastContact.destructible ? 'v' : 'g'}:${b.lastContact.normal.x.toFixed(0)},${b.lastContact.normal.y.toFixed(0)},${b.lastContact.normal.z.toFixed(0)}:${b.lastContact.normalSpeed.toFixed(2)}`,
             })),
           };

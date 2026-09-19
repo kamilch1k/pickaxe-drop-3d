@@ -13,9 +13,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errors = [];
 
 const CONFIGS = [
-  { name: 'E align 9 spin 2.5-6', patch: { alignmentStrength: 9, initialSpinMin: 2.5, initialSpinMax: 6 } },
-  { name: 'F align 10 spin 2-6', patch: { alignmentStrength: 10, initialSpinMin: 2, initialSpinMax: 6 } },
-  { name: 'G align 11 spin 2-5.5', patch: { alignmentStrength: 11, initialSpinMin: 2, initialSpinMax: 5.5 } },
+  { name: 'A default', patch: {} },
+  { name: 'B probe 0.10', patch: { probeRadius: 0.1 } },
+  { name: 'C lane 0.45', patch: { corridorHalfDepth: 0.45 } },
+  { name: 'D hop 9', patch: { breakHopSpeed: 9 } },
+  { name: 'E spin 3-6', patch: { initialSpinMin: 3, initialSpinMax: 6 } },
 ];
 
 const browser = await puppeteer.launch({
@@ -46,12 +48,12 @@ for (const cfg of CONFIGS) {
   await page.evaluate((n) => window.__game.dev.dropMany(n, 'wooden'), DROPS);
   await sleep(5200);
   const info = await page.evaluate(() => window.__game.dev.simInfo());
-  const vk = info.firstVoxelKinds ?? {};
-  const vq = info.firstVoxelQualities ?? {};
+  const vk = info.firstKinds ?? {};
+  const vq = info.qualities ?? {};
   const total = Object.values(vk).reduce((a, b) => a + b, 0) || 1;
   const p = (m) => (((m ?? 0) / total) * 100).toFixed(1);
   console.log(
-    `${cfg.name.padEnd(24)} n=${String(total).padStart(3)}  HEAD ${p(vk.head)}%  HANDLE ${p(vk.handle)}%   PERFECT ${p(vq.PERFECT_HEAD_HIT)}%  HEAD ${p(vq.HEAD_HIT)}%  SIDE ${p(vq.SIDE_HIT)}%  GLANCE ${p(vq.GLANCING_HIT)}%  HANDLE ${p(vq.HANDLE_HIT)}%`,
+    `${cfg.name.padEnd(24)} n=${String(total).padStart(3)}  FIRST HEAD ${p(vk.head)}%  HANDLE ${p(vk.handle)}%   ALL PERFECT ${p(vq.PERFECT_HEAD_HIT)}%  HEAD ${p(vq.HEAD_HIT)}%  SIDE ${p(vq.SIDE_HIT)}%  GLANCE ${p(vq.GLANCING_HIT)}%`,
   );
   await page.evaluate(() => window.__game.dev.lab());
   await sleep(2600);

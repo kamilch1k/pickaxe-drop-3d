@@ -46,7 +46,7 @@ for (let i = 0; i < 60; i++) {
       `${(i * 0.2).toFixed(1)}s  BURIED ${buried
         .map(
           (d) =>
-            `#${d.idx} y=${d.y} x=${d.x} z=${d.z} vy=${d.vy} vh=${d.vh} v=${d.speed} sleep=${d.sleeping ? 'Y' : 'n'} [${d.contact}]`,
+            `#${d.idx} y=${d.y} x=${d.x} z=${d.z} vy=${d.vy} vz=${d.vz} v=${d.speed} sleep=${d.sleeping ? 'Y' : 'n'} [${d.contact}]`,
         )
         .join(' | ')}`,
     );
@@ -65,7 +65,7 @@ for (let i = 0; i < 60; i++) {
     `${(i * 0.2).toFixed(1)}s  asleep=${asleep}  ${fast
       .map(
         (d) =>
-          `#${d.idx} v=${d.speed} spin=${d.spin} y=${d.y} x=${d.x} z=${d.z} vy=${d.vy} vh=${d.vh} [${d.contact}]`,
+          `#${d.idx} v=${d.speed} spin=${d.spin} y=${d.y} x=${d.x} z=${d.z} vy=${d.vy} lane=${d.lane} [${d.contact}]`,
       )
       .join(' | ')}`,
   );

@@ -1,21 +1,25 @@
-import { Object3D, Quaternion, Vector3 } from 'three';
+import { Quaternion, Vector3, type Object3D } from 'three';
 
 /**
- * PickaxeSimulator - a deliberately specialised physics toy for falling
- * pickaxes. This is NOT a rigid body engine: it only does
+ * PickaxeSimulator - a specialised planar solver for falling pickaxes.
  *
- *   fall -> spin -> sweep -> impact -> bounce -> angular response
- *        -> destroy -> penetrate -> stick -> sleep
+ * This is a port of the physics from the Pickaxe Drop Astra experiment
+ * (kamilch1k/pickaxe-drop-astra, src/physics.js), rewired to this game's voxel
+ * targets. The design in one sentence: a pickaxe is locked to a vertical
+ * interaction plane (it only spins about the plane normal and stays inside a
+ * thin depth corridor), and every collision is a swept sphere resolved at its
+ * exact time of impact.
  *
- * Everything is written with plain vector/quaternion maths so the same formulas
- * can be re-implemented in Luau for the Roblox version later. The only Three.js
- * types used here are math classes; nothing in this file touches the renderer,
- * the scene graph (beyond writing the visual Object3D transform) or any physics
- * engine.
+ *   fall -> spin -> sweep -> impact -> bounce -> spin response
+ *        -> break (rebound + hop out of the crater) -> sleep
  *
- * Collision querying lives behind the CollisionWorld interface, so the voxel
- * grid can be swapped for a raycast adapter (or Luau `workspace:Raycast`)
- * without touching the simulation.
+ * Everything is plain vector/quaternion maths so the same formulas can be
+ * re-implemented in Luau later. The only Three.js types used here are math
+ * classes; nothing in this file touches the renderer, the scene graph (beyond
+ * writing the visual Object3D transform) or any physics engine. The file sticks
+ * to erasable TypeScript syntax so `node --test` can run it directly.
+ *
+ * Collision querying lives behind the CollisionWorld interface.
  */
 
 // ----------------------------------------------------------------- tuning ---
@@ -24,707 +28,866 @@ export interface PickaxeTuning {
   gravity: number;
   fixedDelta: number;
   mass: number;
-  inverseInertia: number;
+  /** scalar inertia = mass * inertiaScale * toolScale^2 */
+  inertiaScale: number;
   linearDrag: number;
   angularDrag: number;
+  /** spawn tumble in radians/second; the sign is randomised per drop */
   initialSpinMin: number;
   initialSpinMax: number;
-  alignmentStrength: number;
-  maxVelocity: number;
-  maxAngularVelocity: number;
   headRestitution: number;
   handleRestitution: number;
   groundRestitution: number;
-  /** |impact speed| below which restitution is ignored (kills resting jitter) */
-  minBounceSpeed: number;
-  /**
-   * Extra exponential damping applied to slow (resting) contacts, per second.
-   * Real contacts are lossy; without this a spinning pickaxe can skate on the
-   * floor far longer than looks good, and sleeping never kicks in.
-   */
-  contactDamping: number;
   friction: number;
-  headDamageMultiplier: number;
-  handleDamageMultiplier: number;
-  penetrationEnergyThreshold: number;
-  penetrationVelocityLoss: number;
-  stickMinSpeed: number;
-  stickAlignmentThreshold: number;
-  stickProbability: number;
-  sleepLinearThreshold: number;
+  maxVelocity: number;
+  maxAngularVelocity: number;
+  /** radius of the collision spheres swept along the probes */
+  probeRadius: number;
+  /** half thickness of the depth corridor around the drop's plane */
+  corridorHalfDepth: number;
+  zVelocityDamping: number;
+  zImpulseScale: number;
+  breakRestitution: number;
+  /** minimum upward speed after smashing a block, so it hops out of the crater */
+  breakHopSpeed: number;
+  breakVelocityLoss: number;
+  sideBreakSpeed: number;
+  sideScrapeMultiplier: number;
+  sideChipMinDamage: number;
+  sideChipMaxDamage: number;
+  sideChipMinSpeed: number;
+  sideChipCooldown: number;
+  /** inward speed below which a head contact is not treated as a strike */
+  minDamageSpeed: number;
+  /** |contact speed| below which restitution is ignored (kills resting jitter) */
+  restSpeed: number;
+  sleepVelocityThreshold: number;
   sleepAngularThreshold: number;
-  sleepDelay: number;
+  sleepTime: number;
+  maxBodies: number;
+  /** angular substep size: smaller = more accurate curved sweeps */
+  maxSubstepAngle: number;
 }
 
 export const DEFAULT_PICKAXE_TUNING: PickaxeTuning = {
-  gravity: -27,
+  gravity: 18,
   fixedDelta: 1 / 120,
-  mass: 1,
-  inverseInertia: 0.35,
-  linearDrag: 0.01,
-  angularDrag: 0.14,
-  initialSpinMin: 2.5,
-  initialSpinMax: 6,
-  alignmentStrength: 10,
+  mass: 2,
+  inertiaScale: 0.55,
+  linearDrag: 0.035,
+  angularDrag: 0.12,
+  initialSpinMin: 1.4,
+  initialSpinMax: 3.2,
+  headRestitution: 0.48,
+  handleRestitution: 0.65,
+  groundRestitution: 0.16,
+  friction: 0.55,
   maxVelocity: 90,
-  maxAngularVelocity: 16,
-  headRestitution: 0.16,
-  handleRestitution: 0.46,
-  groundRestitution: 0.3,
-  minBounceSpeed: 1.5,
-  contactDamping: 2.6,
-  friction: 0.62,
-  headDamageMultiplier: 1,
-  handleDamageMultiplier: 0.05,
-  penetrationEnergyThreshold: 22,
-  penetrationVelocityLoss: 0.2,
-  stickMinSpeed: 8,
-  stickAlignmentThreshold: 0.58,
-  stickProbability: 0.22,
-  sleepLinearThreshold: 0.35,
-  sleepAngularThreshold: 0.8,
-  sleepDelay: 0.4,
+  maxAngularVelocity: 18,
+  probeRadius: 0.06,
+  corridorHalfDepth: 0.3,
+  zVelocityDamping: 12,
+  zImpulseScale: 0.12,
+  breakRestitution: 0.55,
+  breakHopSpeed: 6,
+  breakVelocityLoss: 0.16,
+  sideBreakSpeed: 3,
+  sideScrapeMultiplier: 0.4,
+  sideChipMinDamage: 6,
+  sideChipMaxDamage: 18,
+  sideChipMinSpeed: 1.2,
+  sideChipCooldown: 0.15,
+  minDamageSpeed: 0.5,
+  restSpeed: 1,
+  sleepVelocityThreshold: 0.18,
+  sleepAngularThreshold: 0.55,
+  sleepTime: 0.75,
+  maxBodies: 80,
+  maxSubstepAngle: 0.025,
 };
 
-// ---------------------------------------------------------------- probes ---
+// ---------------------------------------------------------------- probes -----
 
 export type ProbeKind = 'head' | 'handle';
 
 export interface CollisionProbe {
-	name: string;
-	kind: ProbeKind;
-	/** local-space offset from the pickaxe origin */
-	local: Vector3;
+  name: string;
+  kind: ProbeKind;
+  /** local-space offset from the pickaxe origin, already scaled with the tool */
+  local: Vector3;
 }
 
-/**
- * Fallback probe set, used when a caller does not sample probes off its own
- * model (the game does - see physics/ToolProbes.ts).
- */
-export const PICKAXE_PROBES: CollisionProbe[] = [
-  { name: 'HEAD_LEFT', kind: 'head', local: new Vector3(-0.46, 0.47, 0) },
-  { name: 'HEAD_CENTER', kind: 'head', local: new Vector3(0, 0.5, 0) },
-  { name: 'HEAD_RIGHT', kind: 'head', local: new Vector3(0.46, 0.42, 0) },
-  { name: 'HANDLE_MIDDLE', kind: 'handle', local: new Vector3(-0.05, -0.25, 0) },
-  { name: 'HANDLE_END', kind: 'handle', local: new Vector3(-0.13, -0.6, 0) },
-];
-
-// ------------------------------------------------------------- collision ---
+// ---------------------------------------------------------------- world -----
 
 export interface SweepHit {
-	/** 0..1 along the swept segment */
-	t: number;
-	point: Vector3;
-	normal: Vector3;
-	/** true when the hit belongs to the mineable voxel grid */
-	destructible: boolean;
-	/** 0..1; higher is tougher. Used for penetration checks. */
-	resistance: number;
-	/** world position of the block, so the game can carve it */
-	voxelCenter?: Vector3;
-	voxelId?: number;
-	/** optional node behind the hit, e.g. a mesh or a part */
-	node?: unknown;
+  /** 0..1 along the swept segment */
+  t: number;
+  /** fresh Vector3 owned by this hit (never reused by the world) */
+  point: Vector3;
+  /** fresh Vector3 owned by this hit */
+  normal: Vector3;
+  /** penetration at the start point (0 for a clean entry contact) */
+  depth: number;
+  /** true when the hit belongs to the mineable voxel grid */
+  destructible: boolean;
+  /** 0..1; higher is tougher */
+  resistance: number;
+  /** world position of the block, so the game can carve it */
+  voxelCenter?: Vector3;
+  voxelId?: number;
+  /** optional node behind the hit, e.g. a mesh or a part */
+  node?: unknown;
 }
 
 /**
- * The only contact with the outside world. Implement it with a voxel DDA first,
- * a Three.js raycaster as a fallback, and a `workspace:Raycast` version in the
- * Roblox port - the simulation below never knows the difference.
+ * The only contact with the outside world: sweep a sphere along a segment.
+ * A voxel grid, a block list, or `workspace:Spherecast` can all implement this
+ * without the simulation ever knowing the difference.
  */
 export interface CollisionWorld {
-	sweepSegment(start: Vector3, end: Vector3): SweepHit | null;
+  sweepSphere(from: Vector3, to: Vector3, radius: number): SweepHit | null;
 }
 
-// ---------------------------------------------------------------- events ---
+/** Reusable output for sweepAABB so the hot path does not allocate. */
+export interface SweepResult {
+  t: number;
+  normal: Vector3;
+  depth: number;
+}
+
+export function makeSweepResult(): SweepResult {
+  return { t: 0, normal: new Vector3(), depth: 0 };
+}
+
+/**
+ * Swept-sphere vs AABB: the box is grown by the sphere radius and the segment
+ * is clipped against it (slab method). Returns the entry time, the outward
+ * normal, and - when the segment starts inside - how deep it is.
+ */
+export function sweepAABB(
+  a: Vector3,
+  b: Vector3,
+  min: Vector3,
+  max: Vector3,
+  out: SweepResult = makeSweepResult(),
+): SweepResult | null {
+  const inside =
+    a.x >= min.x && a.x <= max.x && a.y >= min.y && a.y <= max.y && a.z >= min.z && a.z <= max.z;
+  if (inside) {
+    let depth = Infinity;
+    let nx = 0;
+    let ny = 0;
+    let nz = 0;
+    const dx = Math.min(a.x - min.x, max.x - a.x);
+    const dy = Math.min(a.y - min.y, max.y - a.y);
+    const dz = Math.min(a.z - min.z, max.z - a.z);
+    if (dx <= dy && dx <= dz) {
+      depth = dx;
+      nx = a.x - min.x < max.x - a.x ? -1 : 1;
+    } else if (dy <= dz) {
+      depth = dy;
+      ny = a.y - min.y < max.y - a.y ? -1 : 1;
+    } else {
+      depth = dz;
+      nz = a.z - min.z < max.z - a.z ? -1 : 1;
+    }
+    out.t = 0;
+    out.depth = depth;
+    out.normal.set(nx, ny, nz);
+    return out;
+  }
+
+  let enter = 0;
+  let exit = 1;
+  let nx = 0;
+  let ny = 0;
+  let nz = 0;
+
+  // X slab
+  const dxs = b.x - a.x;
+  if (Math.abs(dxs) < 1e-10) {
+    if (a.x < min.x || a.x > max.x) return null;
+  } else {
+    let t1 = (min.x - a.x) / dxs;
+    let t2 = (max.x - a.x) / dxs;
+    let sign = -1;
+    if (t1 > t2) {
+      const swap = t1;
+      t1 = t2;
+      t2 = swap;
+      sign = 1;
+    }
+    if (t1 >= enter) {
+      enter = t1;
+      nx = sign;
+      ny = 0;
+      nz = 0;
+    }
+    if (t2 < exit) exit = t2;
+    if (enter > exit) return null;
+  }
+
+  // Y slab
+  const dys = b.y - a.y;
+  if (Math.abs(dys) < 1e-10) {
+    if (a.y < min.y || a.y > max.y) return null;
+  } else {
+    let t1 = (min.y - a.y) / dys;
+    let t2 = (max.y - a.y) / dys;
+    let sign = -1;
+    if (t1 > t2) {
+      const swap = t1;
+      t1 = t2;
+      t2 = swap;
+      sign = 1;
+    }
+    if (t1 >= enter) {
+      enter = t1;
+      nx = 0;
+      ny = sign;
+      nz = 0;
+    }
+    if (t2 < exit) exit = t2;
+    if (enter > exit) return null;
+  }
+
+  // Z slab
+  const dzs = b.z - a.z;
+  if (Math.abs(dzs) < 1e-10) {
+    if (a.z < min.z || a.z > max.z) return null;
+  } else {
+    let t1 = (min.z - a.z) / dzs;
+    let t2 = (max.z - a.z) / dzs;
+    let sign = -1;
+    if (t1 > t2) {
+      const swap = t1;
+      t1 = t2;
+      t2 = swap;
+      sign = 1;
+    }
+    if (t1 >= enter) {
+      enter = t1;
+      nx = 0;
+      ny = 0;
+      nz = sign;
+    }
+    if (t2 < exit) exit = t2;
+    if (enter > exit) return null;
+  }
+
+  if (enter < 0 || enter > 1) return null;
+  out.t = enter;
+  out.depth = 0;
+  out.normal.set(nx, ny, nz);
+  return out;
+}
+
+// ----------------------------------------------------------------- events ---
 
 export type ImpactQuality =
-	| 'PERFECT_HEAD_HIT'
-	| 'HEAD_HIT'
-	| 'SIDE_HIT'
-	| 'HANDLE_HIT'
-	| 'GLANCING_HIT';
+  | 'PERFECT_HEAD_HIT'
+  | 'HEAD_HIT'
+  | 'SIDE_HIT'
+  | 'GLANCING_HIT'
+  | 'HANDLE_HIT';
 
 export interface ImpactEvent {
-	body: PickaxeBody;
-	quality: ImpactQuality;
-	probe: string;
-	probeKind: ProbeKind;
-	point: Vector3;
-	normal: Vector3;
-	normalSpeed: number;
-	energy: number;
-	destructible: boolean;
-	/** 0..1 toughness of the thing that was hit */
-	resistance: number;
-	damage: number;
-	destroyed: boolean;
-	/** angular speed right after the response */
-	spun: number;
-	/**
-	 * Translation that would put the contact probe exactly on the surface.
-	 * Applied when the hit survives; skipped when the block breaks so the tool
-	 * actually travels through the crater instead of being rewound onto it.
-	 */
-	correction: Vector3;
-	/** the block that was struck, when the hit came from the voxel grid */
-	voxelCenter?: Vector3;
-	voxelId?: number;
-	node?: unknown;
+  body: PickaxeBody;
+  quality: ImpactQuality;
+  probe: string;
+  probeKind: ProbeKind;
+  point: Vector3;
+  normal: Vector3;
+  /** inward speed along the contact normal (m/s) */
+  normalSpeed: number;
+  /** 0.5 * mass * normalSpeed^2 */
+  energy: number;
+  /** true when the contact was a side-face scuff rather than a flat hit */
+  side: boolean;
+  destructible: boolean;
+  resistance: number;
+  destroyed: boolean;
+  voxelCenter?: Vector3;
+  voxelId?: number;
+  node?: unknown;
+  /** angular speed right after the response */
+  spun: number;
 }
 
 export interface SimulatorHooks {
-	onImpact?: (event: ImpactEvent) => void;
-	onVoxelDamage?: (event: ImpactEvent) => void;
-	/**
-	 * Called when the solver believes the struck voxel should break. The game
-	 * owns destruction, so it may veto by returning `false` - the pickaxe then
-	 * behaves as if the block survived (bounce / stick).
-	 */
-	onVoxelDestroyed?: (event: ImpactEvent) => boolean | void;
-	onPickaxeStick?: (body: PickaxeBody) => void;
-	onPickaxeStop?: (body: PickaxeBody) => void;
+  onImpact?: (event: ImpactEvent) => void;
+  onVoxelDamage?: (event: ImpactEvent) => void;
+  /**
+   * A damaging head contact. The game owns destruction: it carves its crater
+   * and returns true when a block actually died, which triggers the rebound
+   * and the hop out of the crater.
+   */
+  onVoxelDestroyed?: (event: ImpactEvent) => boolean | void;
+  onPickaxeStop?: (body: PickaxeBody) => void;
 }
 
 // ------------------------------------------------------------------ body ---
 
 export class PickaxeBody {
-	position = new Vector3();
-	velocity = new Vector3();
-	orientation = new Quaternion();
-	angularVelocity = new Vector3();
+  position = new Vector3();
+  velocity = new Vector3();
+  orientation = new Quaternion();
+  angularVelocity = new Vector3();
 
-	previousPosition = new Vector3();
-	previousOrientation = new Quaternion();
+  previousPosition = new Vector3();
+  previousOrientation = new Quaternion();
 
-	mass: number;
-	inverseMass: number;
-	inverseInertia: number;
+  /** interpolated transform the visual is drawn with */
+  renderPosition = new Vector3();
+  renderOrientation = new Quaternion();
 
-	linearDrag: number;
-	angularDrag: number;
+  mass: number;
+  inverseMass: number;
+  inverseInertia: number;
 
-	/** per-tool multipliers taken from the tool definition */
-	gravityScale = 1;
-	restitutionScale = 1;
+  linearDrag: number;
+  angularDrag: number;
+  /** the vertical plane this pickaxe is locked to (its drop's z) */
+  planeZ = 0;
+  halfDepth: number;
+  /** tool scale: drives inertia and the depth corridor */
+  scale: number;
 
-	/** local head axis; the direction that should lead the fall */
-	headAxis = new Vector3(0, 1, 0);
+  active = true;
+  sleeping = false;
 
-	active = true;
-	sleeping = false;
-	stuck = false;
+  /** gameplay payload (drop id, tool def, ...) */
+  userData: Record<string, unknown> = {};
 
-	/** true once this body has touched a destructible voxel (instrumentation) */
-	hasTouchedVoxel = false;
+  /** last contact, kept for instrumentation and the debug view */
+  readonly lastContact = {
+    probe: '',
+    normal: new Vector3(),
+    point: new Vector3(),
+    kind: 'head' as ProbeKind,
+    destructible: false,
+    normalSpeed: 0,
+    time: -1,
+  };
 
-	/** gameplay payload (drop id, tool def, ...) */
-	userData: Record<string, unknown> = {};
+  private stillTime = 0;
+  private readonly beforePoints: Vector3[] = [];
+  private readonly afterPoints: Vector3[] = [];
+  private readonly sideDamageTimes = new Map<number, number>();
+  /** visual is only ever written, never read: the mesh is not the physics */
+  readonly visual: Object3D;
+  readonly probes: CollisionProbe[];
 
-	/** last contact, kept for instrumentation and the debug view */
-	readonly lastContact = {
-		probe: '',
-		normal: new Vector3(),
-		point: new Vector3(),
-		destructible: false,
-		normalSpeed: 0,
-	};
+  constructor(visual: Object3D, probes: CollisionProbe[], tuning: PickaxeTuning, scale = 1) {
+    this.visual = visual;
+    this.probes = probes;
+    this.mass = tuning.mass;
+    this.inverseMass = 1 / tuning.mass;
+    this.scale = scale;
+    this.inverseInertia = 1 / (tuning.mass * tuning.inertiaScale * scale * scale);
+    this.linearDrag = tuning.linearDrag;
+    this.angularDrag = tuning.angularDrag;
+    this.halfDepth = tuning.corridorHalfDepth * Math.max(0.6, scale / 0.9);
+    for (let i = 0; i < probes.length; i += 1) {
+      this.beforePoints.push(new Vector3());
+      this.afterPoints.push(new Vector3());
+    }
+  }
 
-	private stillTime = 0;
+  /** world-space probe positions for the current transform (into a scratch) */
+  points(out: Vector3[]): Vector3[] {
+    for (let i = 0; i < this.probes.length; i += 1) {
+      out[i].copy(this.probes[i].local).applyQuaternion(this.orientation).add(this.position);
+    }
+    return out;
+  }
 
-	constructor(
-		public readonly visual: Object3D,
-		public readonly probes: CollisionProbe[],
-		tuning: PickaxeTuning,
-	) {
-		this.mass = tuning.mass;
-		this.inverseMass = 1 / tuning.mass;
-		this.inverseInertia = tuning.inverseInertia;
-		this.linearDrag = tuning.linearDrag;
-		this.angularDrag = tuning.angularDrag;
-	}
+  before(): Vector3[] {
+    return this.beforePoints;
+  }
 
-	/** world-space position of a probe for a given transform */
-	probeWorld(probe: CollisionProbe, out: Vector3, position = this.position, orientation = this.orientation): Vector3 {
-		return out.copy(probe.local).applyQuaternion(orientation).add(position);
-	}
+  after(): Vector3[] {
+    return this.afterPoints;
+  }
 
-	headDirection(out: Vector3): Vector3 {
-		return out.copy(this.headAxis).applyQuaternion(this.orientation).normalize();
-	}
+  /** local head axis in world space: the +Y shaft direction */
+  headDirection(out: Vector3): Vector3 {
+    return out.set(0, 1, 0).applyQuaternion(this.orientation).normalize();
+  }
 
-	/** Wake a sleeping body (also clears the sleep timer). */
-	wake(): void {
-		this.sleeping = false;
-		this.stillTime = 0;
-	}
+  sideCooldown(blockId: number, time: number): boolean {
+    const until = this.sideDamageTimes.get(blockId) ?? -Infinity;
+    return time >= until;
+  }
 
-	markStill(delta: number, tuning: PickaxeTuning): boolean {
-		const slow = this.velocity.length() < tuning.sleepLinearThreshold
-			&& this.angularVelocity.length() < tuning.sleepAngularThreshold;
-		this.stillTime = slow ? this.stillTime + delta : 0;
-		return this.stillTime >= tuning.sleepDelay;
-	}
+  markSideDamage(blockId: number, until: number): void {
+    this.sideDamageTimes.set(blockId, until);
+  }
+
+  wake(): void {
+    this.sleeping = false;
+    this.active = true;
+    this.stillTime = 0;
+  }
+
+  addStill(delta: number, supported: boolean, tuning: PickaxeTuning): boolean {
+    const slow =
+      this.velocity.length() < tuning.sleepVelocityThreshold &&
+      this.angularVelocity.length() < tuning.sleepAngularThreshold;
+    this.stillTime = supported && slow ? this.stillTime + delta : 0;
+    return this.stillTime > tuning.sleepTime;
+  }
+}
+
+// ------------------------------------------------------------ planar lock ---
+
+/** Rotation is restricted to the interaction plane, whatever else happens. */
+export function enforcePlanarRotation(body: PickaxeBody): void {
+  body.angularVelocity.x = 0;
+  body.angularVelocity.y = 0;
+  const q = body.orientation;
+  const length = Math.hypot(q.z, q.w);
+  if (length > 1e-10) q.set(0, 0, q.z / length, q.w / length);
+  else q.identity();
+}
+
+/** The depth lane constrains centre-of-mass translation. */
+export function enforceZConstraint(body: PickaxeBody): void {
+  const min = body.planeZ - body.halfDepth;
+  const max = body.planeZ + body.halfDepth;
+  body.position.z = Math.max(min, Math.min(max, body.position.z));
+  if ((body.position.z <= min && body.velocity.z < 0) || (body.position.z >= max && body.velocity.z > 0)) {
+    body.velocity.z = 0;
+  }
+}
+
+export function applyImpulse(
+  body: PickaxeBody,
+  r: Vector3,
+  impulse: Vector3,
+  tuning: PickaxeTuning,
+): void {
+  body.velocity.x += impulse.x * body.inverseMass;
+  body.velocity.y += impulse.y * body.inverseMass;
+  body.velocity.z += impulse.z * body.inverseMass * tuning.zImpulseScale;
+  // cap the resulting depth speed to the distance left in one fixed step
+  const min = body.planeZ - body.halfDepth;
+  const max = body.planeZ + body.halfDepth;
+  body.velocity.z = Math.max(
+    (min - body.position.z) / tuning.fixedDelta,
+    Math.min((max - body.position.z) / tuning.fixedDelta, body.velocity.z),
+  );
+  body.angularVelocity.z += (r.x * impulse.y - r.y * impulse.x) * body.inverseInertia;
+  enforcePlanarRotation(body);
+}
+
+export function effectiveInverseMass(
+  body: PickaxeBody,
+  direction: Vector3,
+  tuning: PickaxeTuning,
+): number {
+  return (
+    body.inverseMass *
+    (direction.x * direction.x +
+      direction.y * direction.y +
+      tuning.zImpulseScale * direction.z * direction.z)
+  );
 }
 
 // ------------------------------------------------------------ simulator ----
 
+interface Contact {
+  point: Vector3;
+  normal: Vector3;
+  kind: ProbeKind;
+}
+
 export class PickaxeSimulator {
-	private accumulator = 0;
-	private readonly bodies: PickaxeBody[] = [];
-	private readonly tmpA = new Vector3();
-	private readonly tmpB = new Vector3();
-	private readonly tmpC = new Vector3();
-	private readonly tmpD = new Vector3();
-	private readonly tmpE = new Vector3();
-	private readonly tmpF = new Vector3();
-	private readonly tmpQ = new Quaternion();
+  private accumulator = 0;
+  private time = 0;
+  private readonly bodies: PickaxeBody[] = [];
+  private readonly oldPosition = new Vector3();
+  private readonly spinAxis = new Vector3();
+  private readonly r = new Vector3();
+  private readonly contactVelocity = new Vector3();
+  private readonly impulse = new Vector3();
+  private readonly probePoint = new Vector3();
+  private readonly headScratch = new Vector3();
+  private readonly normalScratch = new Vector3();
+  private readonly oldOrientation = new Quaternion();
+  private readonly spinDelta = new Quaternion();
+  private readonly world: CollisionWorld;
+  readonly tuning: PickaxeTuning;
+  private readonly hooks: SimulatorHooks;
 
-	constructor(
-		private world: CollisionWorld,
-		public tuning: PickaxeTuning,
-		private hooks: SimulatorHooks = {},
-	) {}
+  readonly stats = { head: 0, handle: 0, handleContacts: 0, broken: 0 };
 
-	/** debug snapshot for the visualiser: rebuilt every simulated step */
-	readonly debug = {
-		enabled: false,
-		probePoints: [] as Vector3[],
-		probePrevious: [] as Vector3[],
-		sweepLines: [] as Vector3[],
-		lastQuality: '' as ImpactQuality | '',
-		lastPoint: new Vector3(),
-		lastNormal: new Vector3(),
-		/** contacts resolved since the last debugReset() */
-		contacts: 0,
-		contactKinds: {} as Record<string, number>,
-		/** impact classifications since the last debugReset() */
-		qualities: {} as Record<string, number>,
-		/** classified impacts split by probe kind since the last debugReset() */
-		probeKinds: {} as Record<string, number>,
-		/** first contact of each body, the one that defines how a drop lands */
-		firstKinds: {} as Record<string, number>,
-		firstQualities: {} as Record<string, number>,
-		/** first *voxel* contact of each body: how it lands on a block */
-		firstVoxelKinds: {} as Record<string, number>,
-		firstVoxelQualities: {} as Record<string, number>,
-	};
+  constructor(world: CollisionWorld, tuning: PickaxeTuning, hooks: SimulatorHooks = {}) {
+    this.world = world;
+    this.tuning = tuning;
+    this.hooks = hooks;
+  }
 
-	debugReset(): void {
-		this.debug.contacts = 0;
-		this.debug.contactKinds = {};
-		this.debug.qualities = {};
-		this.debug.probeKinds = {};
-		this.debug.firstKinds = {};
-		this.debug.firstQualities = {};
-		this.debug.firstVoxelKinds = {};
-		this.debug.firstVoxelQualities = {};
-	}
+  /** debug snapshot for the visualiser: only filled while `enabled` */
+  readonly debug = {
+    enabled: false,
+    sweepLines: [] as Vector3[],
+    normals: [] as Vector3[],
+    contacts: [] as Contact[],
+    byKind: {} as Record<string, number>,
+    qualities: {} as Record<string, number>,
+    firstKinds: {} as Record<string, number>,
+    lastQuality: '' as ImpactQuality | '',
+    lastPoint: new Vector3(),
+    lastNormal: new Vector3(),
+  };
 
-	add(body: PickaxeBody): void {
-		this.bodies.push(body);
-	}
+  debugReset(): void {
+    this.debug.byKind = {};
+    this.debug.qualities = {};
+    this.debug.firstKinds = {};
+    this.stats.head = 0;
+    this.stats.handle = 0;
+    this.stats.handleContacts = 0;
+    this.stats.broken = 0;
+  }
 
-	remove(body: PickaxeBody): void {
-		const i = this.bodies.indexOf(body);
-		if (i >= 0) {
-			this.bodies.splice(i, 1);
-		}
-	}
+  add(body: PickaxeBody): boolean {
+    if (this.bodies.length >= this.tuning.maxBodies) {
+      const index = this.bodies.findIndex((b) => b.sleeping);
+      if (index < 0) return false;
+      const old = this.bodies[index];
+      this.bodies.splice(index, 1);
+      old.visual.removeFromParent();
+    }
+    enforceZConstraint(body);
+    enforcePlanarRotation(body);
+    body.previousPosition.copy(body.position);
+    body.previousOrientation.copy(body.orientation);
+    body.renderPosition.copy(body.position);
+    body.renderOrientation.copy(body.orientation);
+    this.bodies.push(body);
+    return true;
+  }
 
-	get all(): readonly PickaxeBody[] {
-		return this.bodies;
-	}
+  remove(body: PickaxeBody): void {
+    const i = this.bodies.indexOf(body);
+    if (i >= 0) this.bodies.splice(i, 1);
+  }
 
-	/** Fixed timestep with an accumulator, so the feel never depends on FPS. */
-	update(frameDelta: number): void {
-		this.accumulator += Math.min(frameDelta, 0.06);
-		const dt = this.tuning.fixedDelta;
-		let guard = 0;
-		while (this.accumulator >= dt && guard < 16) {
-			this.simulateStep(dt);
-			this.accumulator -= dt;
-			guard += 1;
-		}
-		if (guard >= 16) this.accumulator = 0;
-	}
+  get all(): readonly PickaxeBody[] {
+    return this.bodies;
+  }
 
-	/** One fixed step. Long falls are split so nothing tunnels. */
-	simulateStep(dt: number): void {
-		for (let i = this.bodies.length - 1; i >= 0; i -= 1) {
-			const body = this.bodies[i];
-			if (!body.active) {
-				this.bodies.splice(i, 1);
-				continue;
-			}
-			if (body.sleeping || body.stuck) {
-				continue;
-			}
+  /** Fixed timestep with an accumulator, then interpolate the visuals. */
+  update(delta: number): void {
+    this.accumulator += Math.min(delta, 0.1);
+    const dt = this.tuning.fixedDelta;
+    let guard = 0;
+    while (this.accumulator >= dt && guard < 16) {
+      this.step(dt);
+      this.accumulator -= dt;
+      guard += 1;
+    }
+    if (guard >= 16) this.accumulator = 0;
+    const alpha = this.accumulator / dt;
+    for (const body of this.bodies) this.syncVisual(body, alpha);
+  }
 
-			const speed = body.velocity.length();
-			// keep the per-substep travel well under one voxel so a contact
-			// response is never applied from inside geometry
-			const travel = speed * dt;
-			const substeps = Math.min(6, Math.max(1, Math.ceil(travel / 0.16)));
-			const step = dt / substeps;
-			let touched = false;
-			for (let s = 0; s < substeps; s += 1) {
-				this.integrateLinear(body, step);
-				this.integrateAngular(body, step);
-				const hit = this.performSweptCollision(body);
-				if (hit) {
-					touched = true;
-					const impact = this.resolveCollision(body, hit);
-					this.handlePenetration(body, impact);
-				}
-				if (body.stuck) {
-					break;
-				}
-			}
+  syncVisual(body: PickaxeBody, alpha = 1): void {
+    body.renderPosition.lerpVectors(body.previousPosition, body.position, alpha);
+    body.renderOrientation.slerpQuaternions(body.previousOrientation, body.orientation, alpha);
+    body.visual.position.copy(body.renderPosition);
+    body.visual.quaternion.copy(body.renderOrientation);
+  }
 
-			if (touched) this.applyContactDamping(body, dt);
-			this.handleSleeping(body, dt);
-			this.writeTransform(body);
-		}
-	}
+  step(dt: number): void {
+    this.time += dt;
+    const tuning = this.tuning;
+    if (this.debug.enabled) {
+      this.debug.sweepLines.length = 0;
+      this.debug.normals.length = 0;
+      this.debug.contacts.length = 0;
+    }
 
-	// ---------------------------------------------------------- integration --
+    for (const body of this.bodies) {
+      enforcePlanarRotation(body);
+      body.previousPosition.copy(body.position);
+      body.previousOrientation.copy(body.orientation);
+      if (!body.active) continue;
 
-	private integrateLinear(body: PickaxeBody, dt: number): void {
-		body.previousPosition.copy(body.position);
-		body.previousOrientation.copy(body.orientation);
+      body.velocity.y -= tuning.gravity * dt;
+      body.velocity.z *= Math.exp(-tuning.zVelocityDamping * dt);
+      body.velocity.multiplyScalar(Math.exp(-body.linearDrag * dt));
+      body.angularVelocity.multiplyScalar(Math.exp(-body.angularDrag * dt));
+      body.velocity.clampLength(0, tuning.maxVelocity);
+      body.angularVelocity.clampLength(0, tuning.maxAngularVelocity);
 
-		body.velocity.y += this.tuning.gravity * body.gravityScale * dt;
+      // Angular substeps keep curved probe trajectories close to segments.
+      const spin = body.angularVelocity.length();
+      const count = Math.max(2, Math.ceil((spin * dt) / tuning.maxSubstepAngle));
+      let supported = false;
 
-		if (body.linearDrag > 0) {
-			body.velocity.multiplyScalar(Math.exp(-body.linearDrag * dt));
-		}
+      for (let s = 0; s < count; s += 1) {
+        let remaining = dt / count;
+        for (let iteration = 0; iteration < 16 && remaining > 1e-7; iteration += 1) {
+          this.oldPosition.copy(body.position);
+          this.oldOrientation.copy(body.orientation);
+          const before = body.points(body.before());
 
-		const max = this.tuning.maxVelocity;
-		if (body.velocity.lengthSq() > max * max) {
-			body.velocity.setLength(max);
-		}
+          body.position.addScaledVector(body.velocity, remaining);
+          enforceZConstraint(body);
+          const speed = body.angularVelocity.length();
+          if (speed > 1e-9) {
+            this.spinAxis.copy(body.angularVelocity).divideScalar(speed);
+            this.spinDelta.setFromAxisAngle(this.spinAxis, speed * remaining);
+            body.orientation.premultiply(this.spinDelta).normalize();
+          }
+          const after = body.points(body.after());
 
-		body.position.addScaledVector(body.velocity, dt);
-	}
+          let first: SweepHit | null = null;
+          let firstIndex = -1;
+          for (let i = 0; i < before.length; i += 1) {
+            if (this.debug.enabled) {
+              this.debug.sweepLines.push(before[i].clone(), after[i].clone());
+            }
+            const hit = this.world.sweepSphere(before[i], after[i], tuning.probeRadius);
+            if (hit && (!first || hit.t < first.t)) {
+              first = hit;
+              firstIndex = i;
+            }
+          }
+          if (!first) break;
 
-	private integrateAngular(body: PickaxeBody, dt: number): void {
-		this.applyAlignmentTorque(body, dt);
+          // rewind to the exact time of impact
+          body.position.lerpVectors(this.oldPosition, body.position, first.t);
+          body.orientation.slerpQuaternions(this.oldOrientation, body.orientation, first.t);
 
-		if (body.angularDrag > 0) {
-			body.angularVelocity.multiplyScalar(Math.exp(-body.angularDrag * dt));
-		}
+          const probe = body.probes[firstIndex];
+          const point = this.probePoint
+            .copy(probe.local)
+            .applyQuaternion(body.orientation)
+            .add(body.position);
+          this.r.copy(point).sub(body.position);
+          const n = first.normal;
+          this.contactVelocity.copy(body.angularVelocity).cross(this.r).add(body.velocity);
+          const vn = this.contactVelocity.dot(n);
+          const normalSpeed = Math.max(0, -vn);
+          supported = supported || n.y > 0.5;
 
-		const max = this.tuning.maxAngularVelocity;
-		if (body.angularVelocity.lengthSq() > max * max) {
-			body.angularVelocity.setLength(max);
-		}
+          if (this.debug.enabled) {
+            this.debug.contacts.push({ point: point.clone(), normal: n.clone(), kind: probe.kind });
+          }
+          body.lastContact.probe = probe.name;
+          body.lastContact.normal.copy(n);
+          body.lastContact.point.copy(point);
+          body.lastContact.kind = probe.kind;
+          body.lastContact.destructible = first.destructible;
+          body.lastContact.normalSpeed = normalSpeed;
+          body.lastContact.time = this.time;
 
-		const spin = body.angularVelocity.length();
-		if (spin > 1e-5) {
-			this.tmpA.copy(body.angularVelocity).multiplyScalar(1 / spin); // axis
-			this.tmpQ.setFromAxisAngle(this.tmpA, spin * dt);
-			body.orientation.premultiply(this.tmpQ).normalize();
-		}
-	}
+          let broken = false;
+          if (first.destructible) {
+            broken = this.resolveVoxelContact(body, probe, first, point, n, vn, normalSpeed);
+          } else if (normalSpeed > 1.2) {
+            this.hooks.onImpact?.(this.buildEvent(body, probe, first, point, n, normalSpeed, false));
+          }
 
-	/**
-	 * A subtle fake aerodynamic torque: gravity alone never makes a pickaxe fall
-	 * head-first, and a completely random tumble looks like junk. This biases the
-	 * head towards the direction of travel without ever cancelling the spin, so
-	 * the tool still wobbles, overshoots and occasionally lands badly.
-	 *
-	 * It only acts on a genuine fall (fast downward velocity). Steered by any
-	 * horizontal velocity it would feed the ground friction, which feeds it back,
-	 * and pickaxes would accelerate across the arena forever.
-	 */
-	private applyAlignmentTorque(body: PickaxeBody, dt: number): void {
-		const fall = -body.velocity.y;
-		if (fall < 4) {
-			return;
-		}
-		const gain = Math.min(1, (fall - 4) / 8);
-		const speed = body.velocity.length();
-		const desired = this.tmpA.copy(body.velocity).multiplyScalar(1 / speed);
-		const head = body.headDirection(this.tmpB);
-		const axis = this.tmpC.copy(head).cross(desired);
-		body.angularVelocity.addScaledVector(axis, this.tuning.alignmentStrength * gain * dt);
-	}
+          if (broken) {
+            this.stats.broken += 1;
+            // A destroyed block kicks the pickaxe back out of the newly opened
+            // cell: rebound along the normal, then a guaranteed upward hop, so
+            // the tool never drills down its own crater.
+            const denom =
+              effectiveInverseMass(body, n, tuning) +
+              body.inverseInertia * (this.r.x * n.y - this.r.y * n.x) ** 2;
+            if (vn < 0 && denom > 1e-9) {
+              this.impulse
+                .copy(n)
+                .multiplyScalar(-((1 + tuning.breakRestitution) * vn) / denom);
+              applyImpulse(body, this.r, this.impulse, tuning);
+            }
+            body.velocity.x *= 1 - tuning.breakVelocityLoss;
+            if (Math.abs(n.x) > 0.5 && body.velocity.x * n.x < tuning.sideBreakSpeed) {
+              this.impulse.set(
+                n.x * (tuning.sideBreakSpeed - body.velocity.x * n.x) * body.mass,
+                0,
+                0,
+              );
+              applyImpulse(body, this.r, this.impulse, tuning);
+            }
+            if (body.velocity.y < tuning.breakHopSpeed) {
+              this.impulse.set(0, (tuning.breakHopSpeed - body.velocity.y) * body.mass, 0);
+              applyImpulse(body, this.r, this.impulse, tuning);
+            }
+            body.position.addScaledVector(n, 0.002);
+          } else {
+            body.position.addScaledVector(n, first.depth + 0.001);
+            if (vn < 0) {
+              const restitution =
+                normalSpeed < tuning.restSpeed
+                  ? 0
+                  : !first.destructible
+                    ? tuning.groundRestitution
+                    : probe.kind === 'head'
+                      ? tuning.headRestitution
+                      : tuning.handleRestitution;
+              const denom =
+                effectiveInverseMass(body, n, tuning) +
+                body.inverseInertia * (this.r.x * n.y - this.r.y * n.x) ** 2;
+              if (denom > 1e-9) {
+                const j = (-(1 + restitution) * vn) / denom;
+                this.impulse.copy(n).multiplyScalar(j);
+                applyImpulse(body, this.r, this.impulse, tuning);
+                const tangent = this.impulse.copy(this.contactVelocity).addScaledVector(n, -vn);
+                if (tangent.lengthSq() > 1e-10) {
+                  const speedT = tangent.length();
+                  tangent.divideScalar(speedT);
+                  const jt = Math.min(
+                    tuning.friction * j,
+                    speedT /
+                      (effectiveInverseMass(body, tangent, tuning) +
+                        body.inverseInertia * (this.r.x * tangent.y - this.r.y * tangent.x) ** 2),
+                  );
+                  tangent.multiplyScalar(-jt);
+                  applyImpulse(body, this.r, tangent, tuning);
+                }
+              }
+            }
+          }
 
-	/**
-	 * Contacts bleed a little energy even when the impact was gentle. Applied
-	 * only to slow motion so real bounces stay lively, but it guarantees a
-	 * rocking / spinning pickaxe actually comes to rest instead of skating.
-	 */
-	private applyContactDamping(body: PickaxeBody, dt: number): void {
-		const k = Math.exp(-this.tuning.contactDamping * dt);
-		if (body.velocity.length() < 4) body.velocity.multiplyScalar(k);
-		if (body.angularVelocity.length() < 6) body.angularVelocity.multiplyScalar(k);
-	}
+          enforceZConstraint(body);
+          remaining *= 1 - first.t;
+          if (first.t < 1e-5) remaining = Math.max(0, remaining - 1e-5);
+          body.velocity.clampLength(0, tuning.maxVelocity);
+          body.angularVelocity.clampLength(0, tuning.maxAngularVelocity);
+        }
+      }
 
-	// ------------------------------------------------------------ collision --
+      if (body.addStill(dt, supported, tuning)) {
+        body.sleeping = true;
+        body.active = false;
+        body.velocity.set(0, 0, 0);
+        body.angularVelocity.set(0, 0, 0);
+        this.hooks.onPickaxeStop?.(body);
+      }
+    }
+  }
 
-	/**
-	 * Every probe is swept from where it was last step to where it is now, and
-	 * the earliest hit along the whole body wins. Point-in-block tests are never
-	 * used on their own: a fast pickaxe would tunnel straight through.
-	 */
-	private performSweptCollision(body: PickaxeBody): (SweepHit & { probe: CollisionProbe }) | null {
-		const record = this.debug.enabled;
-		if (record) {
-			this.debug.probePoints.length = 0;
-			this.debug.probePrevious.length = 0;
-			this.debug.sweepLines.length = 0;
-		}
+  /**
+   * Head contacts mine (a flat hit) or chip (a side scuff); handle contacts
+   * never damage. The game carves the crater and tells us whether a block died.
+   */
+  private resolveVoxelContact(
+    body: PickaxeBody,
+    probe: CollisionProbe,
+    hit: SweepHit,
+    point: Vector3,
+    n: Vector3,
+    vn: number,
+    normalSpeed: number,
+  ): boolean {
+    const tuning = this.tuning;
+    const head = probe.kind === 'head';
+    const sideHead = head && Math.abs(n.x) > 0.5;
+    let damaging = false;
+    let energy = 0.5 * body.mass * normalSpeed * normalSpeed;
 
-		let best: (SweepHit & { probe: CollisionProbe }) | null = null;
-		let bestDepth = 0;
-		const from = this.tmpD;
-		const to = this.tmpE;
+    if (head) {
+      if (sideHead) {
+        const tangentSq = Math.max(0, this.contactVelocity.lengthSq() - vn * vn);
+        const cuttingSq = normalSpeed * normalSpeed + tuning.sideScrapeMultiplier * tangentSq;
+        const blockId = hit.voxelId ?? -1;
+        damaging =
+          cuttingSq > tuning.sideChipMinSpeed * tuning.sideChipMinSpeed &&
+          body.sideCooldown(blockId, this.time);
+        energy = Math.min(
+          tuning.sideChipMaxDamage,
+          Math.max(tuning.sideChipMinDamage, 0.5 * body.mass * cuttingSq),
+        );
+        if (damaging) body.markSideDamage(blockId, this.time + tuning.sideChipCooldown);
+      } else {
+        damaging = normalSpeed > tuning.minDamageSpeed;
+      }
+    } else {
+      this.stats.handleContacts += 1;
+    }
 
-		for (let i = 0; i < body.probes.length; i += 1) {
-			const probe = body.probes[i];
-			body.probeWorld(probe, from, body.previousPosition, body.previousOrientation);
-			body.probeWorld(probe, to, body.position, body.orientation);
+    const quality = damaging
+      ? this.classifyImpact(body, probe, n, normalSpeed, sideHead)
+      : 'GLANCING_HIT';
+    const event = this.buildEvent(body, probe, hit, point, n, normalSpeed, sideHead, energy, quality);
+    this.debug.lastQuality = damaging ? quality : '';
+    this.debug.lastPoint.copy(point);
+    this.debug.lastNormal.copy(n);
 
-			if (record) {
-				this.debug.probePrevious.push(from.clone());
-				this.debug.probePoints.push(to.clone());
-				this.debug.sweepLines.push(from.clone(), to.clone());
-			}
+    if (this.debug.enabled && damaging) {
+      this.debug.byKind[probe.kind] = (this.debug.byKind[probe.kind] ?? 0) + 1;
+      this.debug.qualities[quality] = (this.debug.qualities[quality] ?? 0) + 1;
+      if (body.userData.firstVoxel !== true) {
+        body.userData.firstVoxel = true;
+        this.debug.firstKinds[probe.kind] = (this.debug.firstKinds[probe.kind] ?? 0) + 1;
+      }
+    }
 
-			const hit = this.world.sweepSegment(from, to);
-			if (!hit) {
-				continue;
-			}
-			// How far the probe already is past the contact point. On a tie the
-			// deepest probe wins: otherwise the first probe in the list (often
-			// one that already sits exactly on the surface) would soak up the
-			// contact forever and a buried body could never be pushed out.
-			const depth = to.distanceTo(hit.point);
-			if (!best || hit.t < best.t - 1e-6 || (hit.t <= best.t + 1e-6 && depth > bestDepth)) {
-				best = { ...hit, probe };
-				bestDepth = depth;
-			}
-		}
+    if (!damaging) {
+      if (normalSpeed > 1.2) this.hooks.onImpact?.(event);
+      return false;
+    }
+    if (probe.kind === 'handle') this.stats.handle += 1;
+    else this.stats.head += 1;
+    this.hooks.onImpact?.(event);
+    this.hooks.onVoxelDamage?.(event);
+    const destroyed = this.hooks.onVoxelDestroyed?.(event);
+    event.destroyed = destroyed === true;
+    return event.destroyed;
+  }
 
-		return best;
-	}
+  private buildEvent(
+    body: PickaxeBody,
+    probe: CollisionProbe,
+    hit: SweepHit,
+    point: Vector3,
+    n: Vector3,
+    normalSpeed: number,
+    side: boolean,
+    energy = 0.5 * body.mass * normalSpeed * normalSpeed,
+    quality: ImpactQuality = 'GLANCING_HIT',
+  ): ImpactEvent {
+    return {
+      body,
+      quality,
+      probe: probe.name,
+      probeKind: probe.kind,
+      point: point.clone(),
+      normal: n.clone(),
+      normalSpeed,
+      energy,
+      side,
+      destructible: hit.destructible,
+      resistance: hit.resistance,
+      destroyed: false,
+      voxelCenter: hit.voxelCenter?.clone(),
+      voxelId: hit.voxelId,
+      node: hit.node,
+      spun: body.angularVelocity.length(),
+    };
+  }
 
-	/**
-	 * Single-contact impulse response at the probe that touched:
-	 *
-	 *   r  = contactPoint - bodyPosition
-	 *   vp = velocity + angularVelocity x r        (velocity of the contact)
-	 *   vn = vp . n
-	 *
-	 *   j  = -(1 + e) * vn / (1/m + invI * |r x n|^2)
-	 *   velocity        += n * j / m
-	 *   angularVelocity += (r x n*j) * invI
-	 *
-	 * then the tangential part of vp gets a clamped friction impulse through the
-	 * same denominator. That is the whole solver - one contact, no tensor, no
-	 * iteration - but it means an off-centre hit spins the pickaxe the way it
-	 * should and a spinning pickaxe does not sink into the ground.
-	 */
-	private resolveCollision(body: PickaxeBody, hit: SweepHit & { probe: CollisionProbe }): ImpactEvent {
-		const normal = this.tmpA.copy(hit.normal).normalize();
-
-		// r = hitPoint - centreOfMass (the authored origin is the pivot). This is
-		// the rotated local offset of the probe, so it does not depend on any
-		// position correction applied below.
-		body.probeWorld(hit.probe, this.tmpB, body.position, body.orientation);
-		const r = this.tmpC.copy(hit.point).sub(body.position);
-		const correction = this.tmpF.copy(hit.point).sub(this.tmpB);
-
-		// contact-point velocity: v + w x r
-		const pointVel = this.tmpB.copy(body.angularVelocity).cross(r).add(body.velocity);
-		const vn = pointVel.dot(normal);
-		const head = hit.probe.kind === 'head';
-		const baseRestitution = hit.destructible
-			? (head ? this.tuning.headRestitution : this.tuning.handleRestitution)
-			: this.tuning.groundRestitution;
-
-		const normalSpeed = Math.max(0, -vn);
-		// below the resting speed a bounce is pointless (and jitters), so the
-		// normal velocity is simply cancelled
-		const restitution = normalSpeed < this.tuning.minBounceSpeed ? 0 : baseRestitution * body.restitutionScale;
-
-		if (vn < 0) {
-			const rn = this.tmpD.copy(r).cross(normal);
-			const denom = body.inverseMass + body.inverseInertia * rn.lengthSq();
-			const j = (-(1 + restitution) * vn) / Math.max(1e-6, denom);
-			body.velocity.addScaledVector(normal, j * body.inverseMass);
-			// Only a real arrival spins the body. A resting contact must not:
-			// the support force is balanced by contacts this one-contact solver
-			// does not model, and applying its torque here pumps rotation
-			// forever (a pickaxe would slowly wind itself up while lying still).
-			if (normalSpeed > this.tuning.minBounceSpeed) {
-				this.applyAngularImpulse(body, r, this.tmpE.copy(normal).multiplyScalar(j));
-			}
-
-			// friction on the tangent of the contact velocity
-			if (this.tuning.friction > 0) {
-				this.tmpE.copy(body.angularVelocity).cross(r).add(body.velocity);
-				const tangent = this.tmpE.addScaledVector(normal, -this.tmpE.dot(normal));
-				const tangentSpeed = tangent.length();
-				if (tangentSpeed > 1e-5) {
-					tangent.multiplyScalar(1 / tangentSpeed);
-					const rt = this.tmpB.copy(r).cross(tangent);
-					const tDenom = body.inverseMass + body.inverseInertia * rt.lengthSq();
-					let jt = -tangentSpeed / Math.max(1e-6, tDenom) * this.tuning.friction;
-					const maxFriction = Math.abs(j) * this.tuning.friction;
-					jt = Math.max(-maxFriction, Math.min(maxFriction, jt));
-					body.velocity.addScaledVector(tangent, jt * body.inverseMass);
-					this.applyAngularImpulse(body, r, this.tmpD.copy(tangent).multiplyScalar(jt));
-				}
-			}
-		}
-		const energy = 0.5 * body.mass * normalSpeed * normalSpeed;
-		const quality = this.classifyImpact(body, hit, normalSpeed);
-		const damage = energy * (head ? this.tuning.headDamageMultiplier : this.tuning.handleDamageMultiplier);
-
-		const event: ImpactEvent = {
-			body,
-			quality,
-			probe: hit.probe.name,
-			probeKind: hit.probe.kind,
-			point: hit.point.clone(),
-			normal: normal.clone(),
-			normalSpeed,
-			energy,
-			destructible: hit.destructible,
-			resistance: hit.destructible ? hit.resistance : 0,
-			damage,
-			destroyed: false,
-			spun: body.angularVelocity.length(),
-			voxelCenter: hit.voxelCenter?.clone(),
-			voxelId: hit.voxelId,
-			node: hit.node,
-			correction: correction.clone(),
-		};
-		this.debug.lastQuality = quality;
-		this.debug.lastPoint.copy(hit.point);
-		this.debug.lastNormal.copy(normal);
-		const firstContact = body.lastContact.probe === '';
-		const firstVoxel = hit.destructible && !body.hasTouchedVoxel;
-		if (hit.destructible) body.hasTouchedVoxel = true;
-		body.lastContact.probe = hit.probe.name;
-		body.lastContact.normal.copy(normal);
-		body.lastContact.point.copy(hit.point);
-		body.lastContact.destructible = hit.destructible;
-		body.lastContact.normalSpeed = normalSpeed;
-		if (this.debug.enabled) {
-			this.debug.contacts += 1;
-			const key = `${hit.probe.name}/${hit.destructible ? 'voxel' : 'ground'}/${normal.x.toFixed(0)},${normal.y.toFixed(0)},${normal.z.toFixed(0)}`;
-			this.debug.contactKinds[key] = (this.debug.contactKinds[key] ?? 0) + 1;
-			if (normalSpeed > 2) {
-				this.debug.qualities[quality] = (this.debug.qualities[quality] ?? 0) + 1;
-				this.debug.probeKinds[hit.probe.kind] = (this.debug.probeKinds[hit.probe.kind] ?? 0) + 1;
-			}
-		}
-		if (firstContact && normalSpeed > 2) {
-			this.debug.firstKinds[hit.probe.kind] = (this.debug.firstKinds[hit.probe.kind] ?? 0) + 1;
-			this.debug.firstQualities[quality] = (this.debug.firstQualities[quality] ?? 0) + 1;
-		}
-		if (firstVoxel && normalSpeed > 2) {
-			this.debug.firstVoxelKinds[hit.probe.kind] = (this.debug.firstVoxelKinds[hit.probe.kind] ?? 0) + 1;
-			this.debug.firstVoxelQualities[quality] = (this.debug.firstVoxelQualities[quality] ?? 0) + 1;
-		}
-		// resting contacts are silent: only real arrivals produce an event
-		if (normalSpeed > 0.25) {
-			this.hooks.onImpact?.(event);
-			if (hit.destructible) {
-				this.hooks.onVoxelDamage?.(event);
-			}
-		}
-		return event;
-	}
-
-	private applyAngularImpulse(body: PickaxeBody, r: Vector3, impulse: Vector3): void {
-		// angularImpulse = r x impulse, scaled by the scalar inverse inertia
-		const angularImpulse = this.tmpB.copy(r).cross(impulse);
-		body.angularVelocity.addScaledVector(angularImpulse, body.inverseInertia);
-	}
-
-	private classifyImpact(
-		body: PickaxeBody,
-		hit: SweepHit & { probe: CollisionProbe },
-		normalSpeed: number,
-	): ImpactQuality {
-		const headDirection = body.headDirection(this.tmpB).clone();
-		const alignment = headDirection.dot(this.tmpC.copy(hit.normal).negate()); // 1 = dead-on
-		const spin = body.angularVelocity.length();
-
-		if (hit.probe.kind === 'handle') {
-			return spin > 4 ? 'SIDE_HIT' : 'HANDLE_HIT';
-		}
-		if (alignment > 0.9 && normalSpeed > 12) {
-			return 'PERFECT_HEAD_HIT';
-		}
-		if (alignment > 0.5) {
-			return 'HEAD_HIT';
-		}
-		return normalSpeed > 10 ? 'SIDE_HIT' : 'GLANCING_HIT';
-	}
-
-	/**
-	 * Destroyed blocks must not stop the pickaxe - chains of destruction are the
-	 * whole point. If the hit cannot be destroyed the tool either loses speed or
-	 * sticks, depending on how square and how hard the impact was.
-	 */
-	private handlePenetration(body: PickaxeBody, event: ImpactEvent): void {
-		if (!event.destructible) {
-			// solid world (arena deck): always push back out of the surface
-			body.position.add(event.correction);
-			return;
-		}
-		const gate = this.tuning.penetrationEnergyThreshold * (0.5 + event.resistance * 1.5);
-		const canBreak = event.damage >= gate;
-		if (canBreak) {
-			const destroyed = this.hooks.onVoxelDestroyed?.(event);
-			if (destroyed !== false) {
-				event.destroyed = true;
-				body.velocity.multiplyScalar(1 - this.tuning.penetrationVelocityLoss);
-				// deliberately NO position correction: the block is gone, so the
-				// pickaxe carries on through the crater it just carved. Chains of
-				// destruction depend on this.
-				return;
-			}
-		}
-
-		// the block survived: separate the probe from the surface before the
-		// stick / bounce cases settle
-		body.position.add(event.correction);
-
-		const alignment = body.headDirection(this.tmpB).dot(this.tmpC.copy(event.normal).negate());
-		if (
-			event.probeKind === 'head'
-			&& event.normalSpeed >= this.tuning.stickMinSpeed
-			&& alignment >= this.tuning.stickAlignmentThreshold
-			&& Math.random() < this.tuning.stickProbability
-		) {
-			body.stuck = true;
-			body.velocity.set(0, 0, 0);
-			body.angularVelocity.set(0, 0, 0);
-			// sink the head a touch into the surface
-			body.position.addScaledVector(event.normal, -0.12);
-			this.hooks.onPickaxeStick?.(body);
-		}
-	}
-
-	private handleSleeping(body: PickaxeBody, dt: number): void {
-		if (body.sleeping) return;
-		if (body.markStill(dt, this.tuning)) {
-			body.sleeping = true;
-			body.velocity.set(0, 0, 0);
-			body.angularVelocity.set(0, 0, 0);
-			this.hooks.onPickaxeStop?.(body);
-		}
-	}
-
-	private writeTransform(body: PickaxeBody): void {
-		body.visual.position.copy(body.position);
-		body.visual.quaternion.copy(body.orientation);
-	}
+  private classifyImpact(
+    body: PickaxeBody,
+    probe: CollisionProbe,
+    normal: Vector3,
+    normalSpeed: number,
+    side: boolean,
+  ): ImpactQuality {
+    if (side) return 'SIDE_HIT';
+    if (probe.kind === 'handle') return 'HANDLE_HIT';
+    const head = body.headDirection(this.headScratch);
+    const alignment = head.dot(this.normalScratch.copy(normal).negate());
+    const spin = body.angularVelocity.length();
+    if (alignment > 0.9 && normalSpeed > 8) return 'PERFECT_HEAD_HIT';
+    if (alignment > 0.5) return 'HEAD_HIT';
+    return spin > 4 ? 'SIDE_HIT' : 'GLANCING_HIT';
+  }
 }

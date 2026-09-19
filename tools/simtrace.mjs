@@ -66,7 +66,7 @@ for (let i = 0; i < 90; i++) {
   const dc = prev ? snap.contacts - prev.contacts : snap.contacts;
   prev = snap.contacts;
   rows.push(
-    `${(i * 0.05).toFixed(2)}  y=${String(snap.d.y).padStart(6)} x=${String(snap.d.x).padStart(6)} z=${String(snap.d.z).padStart(6)}  vy=${String(snap.d.vy).padStart(6)} vh=${String(snap.d.vh).padStart(6)}  spin=${String(snap.d.spin).padStart(5)}  contacts=${String(dc).padStart(3)}  sleep=${snap.d.sleeping ? 'Y' : 'n'} stuck=${snap.d.stuck ? 'Y' : 'n'}`,
+    `${(i * 0.05).toFixed(2)}  y=${String(snap.d.y).padStart(6)} x=${String(snap.d.x).padStart(6)} z=${String(snap.d.z).padStart(6)}  vy=${String(snap.d.vy).padStart(6)} lane=${String(snap.d.lane).padStart(6)}  spin=${String(snap.d.spin).padStart(5)}  contacts=${String(dc).padStart(3)}  sleep=${snap.d.sleeping ? 'Y' : 'n'}`,
   );
 }
 console.log(`tool: ${TOOL}`);

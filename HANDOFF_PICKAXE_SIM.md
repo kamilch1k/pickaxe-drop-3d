@@ -1,25 +1,31 @@
 # Handoff prompt: finish the Rapier-free pickaxe simulation (Three.js version)
 
 > **STATUS: DONE.** The hand-written solver is wired in and Rapier is no longer
-> involved anywhere in the pickaxe drop/mine path. What landed:
+> involved anywhere in the pickaxe drop/mine path. The solver was subsequently
+> replaced by a port of the **Pickaxe Drop Astra** physics (see
+> `src/physics/PickaxeSimulator.ts`): planar lock + depth lane, swept sphere
+> probes against grown voxel AABBs, time-of-impact resolution, break rebound
+> with an upward hop, side chipping, and support-based sleeping.
 >
-> - `src/physics/PickaxeSimulator.ts` — the solver (fall → spin → sweep →
->   impact → bounce → spin response → destroy → penetrate → stick → sleep)
+> - `src/physics/PickaxeSimulator.ts` — the solver, config and planar helpers
 > - `src/physics/VoxelCollisionWorld.ts` — `CollisionWorld` over the voxel grid
->   (DDA / Amanatides & Woo) plus the arena deck
-> - `src/physics/ToolProbes.ts` — collision probes sampled from the tool parts
+>   + deck, implementing `sweepSphere`
+> - `src/physics/ToolProbes.ts` — sparse collision probes sampled from the tool
+>   parts (`HEAD_LEFT/CENTER/RIGHT`, `HANDLE_MIDDLE/END` and extremities)
 > - `src/physics/PickaxeDebugView.ts` — dev overlay (probes, sweeps, normals,
->   vectors, impact classification)
+>   vectors, depth lane)
 > - `src/entities/DropSystem.ts` — pickaxes (`kind === 'pickaxe'`) spawn a
 >   `PickaxeBody` and never touch Rapier; anvils/bombs/saws/drills/boulders/
 >   meteors keep the engine path
+> - `npm test` — solver unit tests in `tools/physics.test.ts`, ported from the
+>   Astra suite (sweeps, planar lock, depth lane, off-centre spin, break hop,
+>   handle damage rules, multi-body settling)
 > - physics lab target + dev hooks (`dev.lab()`, `dev.dropMany()`,
 >   `dev.pickaxeDebug()`, `dev.tuning()`), see the README
-> - QA harnesses: `tools/simtest.mjs`, `simwatch.mjs`, `simtrace.mjs`,
->   `feeltest.mjs`, `sticktest.mjs`, `tunecompare.mjs`, plus the updated
->   `planartest.mjs` / `hoptest.mjs` / `contacttest.mjs`
 >
-> The prompt below is kept for history; nothing in it is still pending.
+> The prompt below is kept for history; nothing in it is still pending. Note
+> that sticking was dropped with the Astra port - the reference solver bounces
+> and hops out of craters instead of sticking.
 
 Paste this into a fresh session running in `C:\Users\rewwe\Documents\OpenCode`.
 
