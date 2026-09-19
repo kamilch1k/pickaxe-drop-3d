@@ -105,6 +105,19 @@ export class PhysicsWorld {
     return n;
   }
 
+  /**
+   * How many colliders are registered as falling-tool colliders. Pickaxes run on
+   * the hand-written solver and must never show up here; the tools that still
+   * use the engine (anvil, bomb, saw, drill, boulder, meteor) do. Dev/QA only.
+   */
+  toolColliderCount(): number {
+    let n = 0;
+    this.owners.forEach((owner) => {
+      if (owner.kind === 'tool') n++;
+    });
+    return n;
+  }
+
   removeBody(body: RAPIER.RigidBody | null | undefined): void {
     if (!body) return;
     for (let i = 0; i < body.numColliders(); i++) {

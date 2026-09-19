@@ -212,6 +212,8 @@ export class Game {
         },
         dropInfo: () => this.drops.snapshot(),
         enabledBodies: () => this.physics.enabledBodyCount(),
+        /** colliders the engine owns for falling tools - must stay 0 for pickaxes */
+        engineToolColliders: () => this.physics.toolColliderCount(),
         cameraInfo: () => {
           const d = this.rig.director.camera.getWorldDirection(new THREE.Vector3());
           return { x: Number(d.x.toFixed(3)), y: Number(d.y.toFixed(3)), z: Number(d.z.toFixed(3)) };
@@ -331,6 +333,7 @@ export class Game {
     dropInfo(): unknown;
     cameraInfo(): { x: number; y: number; z: number };
     enabledBodies(): number;
+    engineToolColliders(): number;
     colliderInfo(): unknown;
     /** toggle the solver debug overlay (probes, sweeps, normals, vectors) */
     pickaxeDebug(on: boolean): void;

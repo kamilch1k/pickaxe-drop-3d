@@ -52,6 +52,7 @@ await page.screenshot({ path: `${OUT}/sim-00-lab.png` });
 const before = await page.evaluate(() => ({
   voxels: window.__game.remainingVoxels,
   hits: window.__game.dropStats.targetHits,
+  engineTools: window.__game.dev.engineToolColliders(),
 }));
 
 await page.evaluate(
@@ -105,8 +106,14 @@ const after = await page.evaluate(() => ({
   voxels: window.__game.remainingVoxels,
   hits: window.__game.dropStats.targetHits,
   ground: window.__game.dropStats.groundHits,
+  engineTools: window.__game.dev.engineToolColliders(),
   perf: window.__game.dev.profileReport().render,
 }));
+const engineToolsAfterPickaxes = after.engineTools;
+// a Rapier-driven tool must still register colliders, proving the counter works
+await page.evaluate(() => window.__game.dev.dropMany(1, 'anvil'));
+await sleep(1200);
+const engineToolsWithAnvil = await page.evaluate(() => window.__game.dev.engineToolColliders());
 const tuning = await page.evaluate(() => window.__game.dev.tuning());
 const info = await page.evaluate(() => window.__game.dev.simInfo());
 const buried = info.drops.filter((d) => d.y < 0.15);
@@ -115,6 +122,9 @@ console.log(`tool: ${TOOL}   dropped: ${COUNT}`);
 console.log(`probes per body: ${info.probesPerBody}`);
 console.log(`voxels destroyed: ${before.voxels - after.voxels}   mining impacts: ${after.hits - before.hits}`);
 console.log(`ground hits: ${after.ground}`);
+console.log(
+  `rapier tool colliders: before pickaxes ${before.engineTools} → after ${engineToolsAfterPickaxes} (must stay 0), one anvil ${engineToolsWithAnvil} (>0 proves the counter works)`,
+);
 console.log(`max speed: ${maxSpeed.toFixed(1)}   max spin: ${maxSpin.toFixed(2)} rad/s`);
 console.log(`lowest y reached: ${minY.toFixed(2)}   settled samples: ${settled}   NaN: ${nan}`);
 console.log(`draw calls: ${after.perf.calls}  triangles: ${after.perf.triangles}`);
