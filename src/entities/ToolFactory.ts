@@ -172,7 +172,14 @@ export function toolCentreOfMass(def: ToolDef, scale: number): THREE.Vector3 {
   return new THREE.Vector3(mx / m, my / m, mz / m);
 }
 
-export function buildTool(def: ToolDef, RAPIER_NS: typeof RAPIER, scaleOverride?: number): BuiltTool {
+/**
+ * Builds the visual meshes for a tool, and (when `RAPIER_NS` is supplied) the
+ * compound collider descriptions for the tools that still run on the engine.
+ * Tools driven by the hand-written pickaxe solver pass no namespace, so the
+ * pickaxe path never constructs a single engine object - only meshes, probes
+ * and mass data.
+ */
+export function buildTool(def: ToolDef, RAPIER_NS?: typeof RAPIER, scaleOverride?: number): BuiltTool {
   const scale = scaleOverride ?? def.scale ?? 1;
   const group = new THREE.Group();
   for (const { mat, geo } of toolGeometries(def, scale)) {
@@ -212,6 +219,8 @@ export function buildTool(def: ToolDef, RAPIER_NS: typeof RAPIER, scaleOverride?
     }
 
     if (p.decor) continue;
+    // solver-driven tools never need engine shapes
+    if (!RAPIER_NS) continue;
     _euler.set(p.rot?.[0] ?? 0, p.rot?.[1] ?? 0, p.rot?.[2] ?? 0);
     _quat.setFromEuler(_euler);
     let desc: RAPIER.ColliderDesc;

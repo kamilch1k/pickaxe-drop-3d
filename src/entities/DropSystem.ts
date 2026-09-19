@@ -221,7 +221,8 @@ export class DropSystem {
   private spawnOne(def: ToolDef, x: number, z: number, height: number): void {
     this.stats.spawned++;
     const { physics, scene } = this.ctx;
-    const built = buildTool(def, physics.RAPIER);
+    // solver-driven pickaxes are built without any engine shapes at all
+    const built = buildTool(def, usesSolver(def) ? undefined : physics.RAPIER);
     const y = height + rand(-0.3, 0.6);
     built.group.position.set(x, y, z);
 
