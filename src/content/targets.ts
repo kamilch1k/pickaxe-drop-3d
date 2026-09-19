@@ -107,3 +107,21 @@ export const TARGETS: TargetSpec[] = [
 export function targetSpec(index: number): TargetSpec {
   return TARGETS[Math.min(index, TARGETS.length - 1)];
 }
+
+/**
+ * Dev-only playground loaded by `__game.dev.lab()`: flat floor, single block,
+ * wall and a pile of blocks. It is deliberately *not* part of TARGETS so it
+ * never shows up in progression, the target log or the save file.
+ */
+export const PHYSICS_LAB: TargetSpec = {
+  id: 'physics-lab',
+  name: 'Physics Lab',
+  subtitle: 'Dev playground',
+  blurb: 'Flat floor, one lone block, a wall and a pile. Hammer away.',
+  builder: 'physicsLab',
+  voxelSize: 0.8,
+  hpScale: 1,
+  completionBonus: 0,
+  accent: '#7cf2d0',
+  framing: 0.95,
+};

@@ -1,5 +1,12 @@
 /**
- * Verifies the pickaxe hops upward after a successful mining hit.
+ * Penetration contract: destroying a block must NOT stop the pickaxe dead.
+ * After every mining hit the tool should still be carrying real speed, either
+ * continuing through the crater (penetration) or rebounding off it (bounce).
+ *
+ * This replaces the old "hop" test: the artificial upward pop after a bite was
+ * removed with the Rapier path, and the hand-written solver produces the motion
+ * from restitution + penetration instead.
+ *
  * Usage: node tools/hoptest.mjs [url] [tool] [drops]
  */
 import puppeteer from 'puppeteer-core';
@@ -42,9 +49,10 @@ await page.evaluate((t) => {
 }, TOOL);
 await sleep(400);
 
-let hops = 0;
-let miningHits = 0;
-let bestRise = 0;
+let hits = 0;
+let moving = 0;
+let minSpeedAfter = Infinity;
+let sumSpeedAfter = 0;
 
 for (let i = 0; i < DROPS; i++) {
   const before = await page.evaluate(() => window.__game.dropStats.targetHits);
@@ -56,42 +64,35 @@ for (let i = 0; i < DROPS; i++) {
   await page.mouse.move(Math.round(p.x), Math.round(p.y));
   await page.mouse.click(Math.round(p.x), Math.round(p.y));
 
-  // watch the newest drop well past its landing moment for an upward phase
-  let lowest = Infinity;
-  let lowestAt = -1;
-  let rose = 0;
-  let peakVy = -99;
-  const trace = [];
-  for (let s = 0; s < 34; s++) {
-    await sleep(200);
-    const d = await page.evaluate(() => {
-      const l = window.__game.dev.dropInfo();
-      if (!l || !l.length) return null;
-      return l.reduce((a, b) => (b.id > a.id ? b : a), l[0]);
-    });
-    if (!d) continue;
-    trace.push(`${d.y.toFixed(1)}/${d.vy.toFixed(1)}`);
-    if (d.y < lowest) {
-      lowest = d.y;
-      lowestAt = trace.length - 1;
+  // sample the newest drop right after the bite lands
+  let speed = 0;
+  for (let s = 0; s < 16; s++) {
+    await sleep(70);
+    const hitNow = await page.evaluate(() => window.__game.dropStats.targetHits);
+    if (hitNow > before) {
+      const d = await page.evaluate(() => {
+        const l = window.__game.dev.dropInfo();
+        return l && l.length ? l.reduce((a, b) => (b.id > a.id ? b : a), l[0]) : null;
+      });
+      speed = d ? d.speed : 0;
+      break;
     }
-    rose = Math.max(rose, d.y - lowest);
-    peakVy = Math.max(peakVy, d.vy);
   }
-  const after = await page.evaluate(() => window.__game.dropStats.targetHits);
-  if (after > before) {
-    miningHits++;
-    if (rose > 0.12) hops++;
-    bestRise = Math.max(bestRise, rose);
-    console.log(
-      `  drop ${i + 1}: mined · rebound ${rose.toFixed(2)}u · peak vy ${peakVy.toFixed(2)} m/s`,
-    );
-    if (i === 0) console.log(`    trace y/vy: ${trace.join('  ')}`);
+  if (speed > 0) {
+    hits++;
+    sumSpeedAfter += speed;
+    minSpeedAfter = Math.min(minSpeedAfter, speed);
+    if (speed > 1.5) moving++;
+    console.log(`  drop ${i + 1}: speed right after the bite ${speed.toFixed(2)} m/s`);
   }
 }
 
-console.log(`\ntool ${TOOL}: ${miningHits} mining hits, ${hops} with a visible upward rebound`);
-console.log(`largest rebound: ${bestRise.toFixed(2)} units`);
+console.log(`\ntool ${TOOL}: ${hits} bites measured`);
+if (hits) {
+  console.log(`  avg speed after a bite: ${(sumSpeedAfter / hits).toFixed(2)} m/s`);
+  console.log(`  slowest after a bite ...: ${minSpeedAfter.toFixed(2)} m/s`);
+  console.log(`  still moving (>1.5 m/s): ${moving}/${hits}`);
+}
 console.log(`errors (${errors.length})`);
 for (const e of errors.slice(0, 6)) console.log(e);
 await browser.close();

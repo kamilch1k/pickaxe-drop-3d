@@ -156,7 +156,8 @@ export type BuilderId =
   | 'treasureBlock'
   | 'memeCreature'
   | 'obsidianBeast'
-  | 'mythicCore';
+  | 'mythicCore'
+  | 'physicsLab';
 
 export const GRID_X = 40;
 export const GRID_Y = 46;
@@ -533,6 +534,36 @@ function buildMythicCore(rng: Rng) {
   return grid;
 }
 
+/* -------------------------------------------------------------- test lab */
+
+/**
+ * Dev-only playground for the hand-written pickaxe solver: a flat floor, one
+ * lone block, a wall and a pile. Deliberately simple geometry so a bad bounce,
+ * a missed probe or a tunnelling pickaxe is obvious at a glance.
+ */
+function buildPhysicsLab(rng: Rng) {
+  const { grid, w } = makeGrid(1);
+  // 1. flat floor
+  w.box(-11, 0, -11, 11, 0, 11, 'deepstone');
+  // 2. a single block, all on its own
+  w.box(6, 1, 6, 8, 3, 8, 'stone');
+  // 3. a thin wall
+  w.box(-7, 1, -8, 3, 12, -8, 'deepstone');
+  // 4. a pile of blocks (with a few ores for the fx)
+  for (let y = 0; y < 4; y++) {
+    const r = 3 - y;
+    for (let x = -r; x <= r; x++) {
+      for (let z = -r; z <= r; z++) {
+        if (x * x + z * z > r * r + 0.4) continue;
+        const roll = rng.range(0, 1);
+        const mat = roll < 0.1 ? 'gold' : roll < 0.24 ? 'copper' : 'stone';
+        w.set(-6 + x, 1 + y, 5 + z, mat);
+      }
+    }
+  }
+  return grid;
+}
+
 export function buildTarget(id: BuilderId, rng: Rng): VoxelGrid {
   switch (id) {
     case 'oreChunk':
@@ -549,6 +580,8 @@ export function buildTarget(id: BuilderId, rng: Rng): VoxelGrid {
       return buildObsidianBeast(rng);
     case 'mythicCore':
       return buildMythicCore(rng);
+    case 'physicsLab':
+      return buildPhysicsLab(rng);
     default:
       return buildOreChunk(rng);
   }

@@ -3,6 +3,8 @@ import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeom
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type RAPIER from '@dimforge/rapier3d-compat';
 import { TOOL_MATERIALS, type ToolDef, type ToolMaterialKey } from '../content/tools';
+import { buildToolProbes } from '../physics/ToolProbes';
+import type { CollisionProbe } from '../physics/PickaxeSimulator';
 
 export interface BuiltTool {
   group: THREE.Group;
@@ -12,6 +14,12 @@ export interface BuiltTool {
    * mines blocks; the wooden handle just bounces off.
    */
   parts: ('head' | 'handle')[];
+  /**
+   * Local-space collision probes for the hand-written pickaxe solver. Sampled
+   * from the same part list as the meshes and the Rapier colliders, so the
+   * custom simulation and the engine-driven tools describe the same object.
+   */
+  probes: CollisionProbe[];
   tip: THREE.Vector3;
   mass: number;
   /** total radius of the compound shape, used for spawn offsets */
@@ -142,11 +150,10 @@ function partVolume(p: { kind: string; size: number[] }, scale: number): number 
 }
 
 /**
- * Centre of mass of the compound in authored part space. All parts are then
- * shifted by `-com`, so the body's origin *is* its centre of mass: Rapier's
- * rotation (about the COM) and our constrained rotation (about the origin)
- * become the same transform and a spinning tool falls perfectly straight
- * instead of orbiting its own head.
+ * Centre of mass of the compound in authored part space. Rapier derives its
+ * rotation pivot from the collider densities, so this is available for HUD
+ * readouts and analysis; the visual group and the custom pickaxe solver both
+ * rotate about the authored origin.
  */
 export function toolCentreOfMass(def: ToolDef, scale: number): THREE.Vector3 {
   let mx = 0;
@@ -233,5 +240,13 @@ export function buildTool(def: ToolDef, RAPIER_NS: typeof RAPIER, scaleOverride?
       ? new THREE.Vector3(tipX / tipW, tipY / tipW, tipZ / tipW)
       : new THREE.Vector3(0, 0, 0);
 
-  return { group, colliders, parts: partKinds, tip, mass: Math.max(mass, 0.2), extent };
+  return {
+    group,
+    colliders,
+    parts: partKinds,
+    probes: buildToolProbes(def, scale),
+    tip,
+    mass: Math.max(mass, 0.2),
+    extent,
+  };
 }

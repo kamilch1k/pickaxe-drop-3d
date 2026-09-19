@@ -13,6 +13,15 @@ import type { Progression } from '../progression/Progression';
 import { MATERIAL_IDS, MATERIALS } from '../content/materials';
 import { clamp } from '../utils/math';
 import { rand } from '../utils/rng';
+import {
+  DEFAULT_PICKAXE_TUNING,
+  PickaxeBody,
+  PickaxeSimulator,
+  type ImpactEvent,
+  type ImpactQuality,
+  type PickaxeTuning,
+} from '../physics/PickaxeSimulator';
+import { VoxelCollisionWorld } from '../physics/VoxelCollisionWorld';
 
 export interface ImpactReport {
   position: THREE.Vector3;
@@ -36,12 +45,17 @@ export interface DropContext {
   getTarget(): Target | null;
   onImpact(report: ImpactReport): void;
   onGroundHit(def: ToolDef, speed: number, pos: THREE.Vector3): void;
+  /** half extent of the arena deck, for the hand-written collision world */
+  groundHalf: number;
 }
 
 export interface ActiveDrop {
   def: ToolDef;
   built: BuiltTool;
-  body: RAPIER.RigidBody;
+  /** physics engine body - only used by tools that still run on Rapier */
+  body: RAPIER.RigidBody | null;
+  /** hand-written solver body - every pickaxe uses this instead of Rapier */
+  sim: PickaxeBody | null;
   hasHit: boolean;
   groundHits: number;
   handleHits: number;
@@ -61,6 +75,8 @@ export interface ActiveDrop {
   id: number;
   /** seconds until this drop may mine again (stops multi-collider double bites) */
   mineCooldown: number;
+  /** seconds until a stuck/resting pickaxe fades away */
+  restTimer: number;
 }
 
 interface PendingSpawn {
@@ -84,7 +100,7 @@ const RIGHT = new THREE.Vector3(1, 0, 0);
 const TMP = new THREE.Vector3();
 const QUAT = new THREE.Quaternion();
 const QUAT2 = new THREE.Quaternion();
-/** the interaction plane's normal: pickaxes spin about this axis */
+/** the interaction plane's normal: planar engine tools spin about this axis */
 const FORWARD = new THREE.Vector3(0, 0, 1);
 const STONE_IDX = MATERIAL_IDS.indexOf('stone');
 /** Minimum arrival speed for a pickaxe head to bite into blocks (m/s). */
@@ -96,6 +112,30 @@ const MIN_MINE_SPEED = 3.2;
  */
 const PLANE_FLATTEN = 2.6;
 
+/**
+ * Pickaxe-kind tools are driven by the hand-written `PickaxeSimulator` and never
+ * touch Rapier. Everything else (anvils, bombs, saws, drills, boulders,
+ * meteors) keeps the engine path it was tuned with.
+ */
+function usesSolver(def: ToolDef): boolean {
+  return def.kind === 'pickaxe';
+}
+
+/** How much each impact classification multiplies the tool's crater damage. */
+const QUALITY_MULT: Record<ImpactQuality, number> = {
+  PERFECT_HEAD_HIT: 2.4,
+  HEAD_HIT: 1.35,
+  SIDE_HIT: 0.5,
+  GLANCING_HIT: 0.25,
+  HANDLE_HIT: 0.08,
+};
+const PERFECT: ImpactQuality = 'PERFECT_HEAD_HIT';
+/** Minimum seconds between two mining bites from the same drop. */
+const MINE_COOLDOWN = 0.085;
+/** How long a stuck / sleeping pickaxe stays in the arena before fading. */
+const STICK_LINGER = 3.4;
+const STOP_LINGER = 1.8;
+
 export class DropSystem {
   private drops: ActiveDrop[] = [];
   private pending: PendingSpawn[] = [];
@@ -105,7 +145,27 @@ export class DropSystem {
   totalDrops = 0;
   readonly stats = { spawned: 0, targetHits: 0, groundHits: 0, denied: 0, voxels: 0 };
 
-  constructor(private ctx: DropContext) {}
+  /** live tuning dials for the hand-written pickaxe solver */
+  readonly tuning: PickaxeTuning = { ...DEFAULT_PICKAXE_TUNING };
+  private readonly sim: PickaxeSimulator;
+  /** dev hook: called for every solver impact so the debug view can label it */
+  debugImpactText: ((event: ImpactEvent) => void) | null = null;
+
+  constructor(private ctx: DropContext) {
+    this.sim = new PickaxeSimulator(
+      new VoxelCollisionWorld(() => this.ctx.getTarget(), {
+        groundY: 0,
+        groundHalf: ctx.groundHalf,
+      }),
+      this.tuning,
+      {
+        onImpact: (event) => this.onSimImpact(event),
+        onVoxelDestroyed: (event) => this.onSimVoxelDestroyed(event),
+        onPickaxeStick: (body) => this.onSimStick(body),
+        onPickaxeStop: (body) => this.onSimStop(body),
+      },
+    );
+  }
 
   /* ---------------------------------------------------------------- spawn */
 
@@ -174,58 +234,47 @@ export class DropSystem {
     const y = height + rand(-0.3, 0.6);
     built.group.position.set(x, y, z);
 
-    const mode = def.spinMode;
+    // Spawn orientation. Solver-driven pickaxes are released roughly head-down -
+    // the heavy end leads, like a real dropped tool - but with a wide random
+    // tilt so every drop still tumbles differently. Engine tools keep the
+    // authoring-plane orientation they were tuned with.
     const q = QUAT;
-    // The tool model is authored with its blade in the local XY plane, so an
-    // identity-ish orientation puts the whole silhouette inside the world XY
-    // plane - the plane the body is locked to below. Only the in-plane angle
-    // (about Z) varies per drop.
-    if (mode === 'planar') {
-      q.setFromAxisAngle(FORWARD, rand(0, Math.PI * 2));
-    } else if (mode === 'axial') {
-      q.setFromAxisAngle(UP, rand(0, Math.PI * 2));
+    if (usesSolver(def)) {
+      const dir = new THREE.Vector3(rand(-1, 1), -rand(0.45, 1), rand(-1, 1)).normalize();
+      q.setFromUnitVectors(UP, dir);
+      QUAT2.setFromAxisAngle(UP, rand(0, Math.PI * 2));
+      q.multiply(QUAT2).normalize();
     } else {
-      q.setFromAxisAngle(UP, rand(0, Math.PI * 2));
-      if (def.kind === 'projectile') {
-        QUAT2.setFromAxisAngle(RIGHT, rand(-0.6, 0.6));
-        q.multiply(QUAT2);
+      const mode = def.spinMode;
+      if (mode === 'planar') {
+        q.setFromAxisAngle(FORWARD, rand(0, Math.PI * 2));
+      } else if (mode === 'axial') {
+        q.setFromAxisAngle(UP, rand(0, Math.PI * 2));
       } else {
-        QUAT2.setFromAxisAngle(
-          new THREE.Vector3(rand(-1, 1), 0, rand(-1, 1)).normalize(),
-          rand(0.2, 0.8),
-        );
-        q.multiply(QUAT2);
+        q.setFromAxisAngle(UP, rand(0, Math.PI * 2));
+        if (def.kind === 'projectile') {
+          QUAT2.setFromAxisAngle(RIGHT, rand(-0.6, 0.6));
+          q.multiply(QUAT2);
+        } else {
+          QUAT2.setFromAxisAngle(
+            new THREE.Vector3(rand(-1, 1), 0, rand(-1, 1)).normalize(),
+            rand(0.2, 0.8),
+          );
+          q.multiply(QUAT2);
+        }
       }
     }
+    q.normalize();
     built.group.quaternion.copy(q);
     scene.add(built.group);
 
-    // 2D-in-3D rigid body: X/Y translation plus rotation about Z only. These
-    // are real Rapier degree-of-freedom constraints, so the solver itself can
-    // never accumulate depth velocity or off-plane spin - no per-frame
-    // transform fighting is needed.
-    const bodyDesc = physics.RAPIER.RigidBodyDesc.dynamic()
-      .setTranslation(x, y, z)
-      .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w })
-      .setLinearDamping(def.linearDamping)
-      .setAngularDamping(def.angularDamping)
-      .setGravityScale(def.gravityScale)
-      .setCcdEnabled(def.ccd === true)
-      .enabledTranslations(true, true, false);
-    const body = physics.world.createRigidBody(bodyDesc);
-    if (mode === 'planar') {
-      body.setEnabledRotations(false, false, true, true);
-    } else if (mode === 'axial') {
-      body.setEnabledRotations(false, true, false, true);
-    }
-
     const tip = built.tip.clone().applyQuaternion(q).add(built.group.position);
-    const spin = def.spin * rand(0.75, 1.25) * (rand(0, 1) < 0.5 ? 1 : -1);
 
     const drop: ActiveDrop = {
       def,
       built,
-      body,
+      body: null,
+      sim: null,
       hasHit: false,
       groundHits: 0,
       handleHits: 0,
@@ -242,22 +291,91 @@ export class DropSystem {
       radiusBlocks: def.radiusBlocks * this.ctx.progression.radiusMul,
       id: this.nextDropId++,
       mineCooldown: 0,
+      restTimer: 0,
     };
 
-    built.colliders.forEach((c, i) => {
-      const col = physics.world.createCollider(c, body);
-      physics.registerCollider(col.handle, {
-        kind: 'tool',
-        ref: drop,
-        part: built.parts[i] ?? 'head',
-      });
-    });
+    if (usesSolver(def)) {
+      this.spawnSolverBody(drop, def, built, x, y, z, q);
+    } else {
+      this.spawnEngineBody(drop, def, built, x, y, z, q);
+    }
 
-    // Spawn velocity: a touch of horizontal drift for the pickaxes, downward
-    // always, and never any depth component.
-    const lateral = mode === 'planar' ? rand(-0.5, 0.5) : 0;
-    body.setLinvel({ x: lateral, y: -2.5, z: 0 }, true);
+    this.drops.push(drop);
+    this.ctx.audio.whoosh(def.kind === 'projectile' ? 1.4 : 1);
+  }
 
+  /**
+   * Hand-written solver path. No Rapier body, no colliders: the pickaxe is a
+   * `PickaxeBody` and the mesh is purely a visual transform the solver writes.
+   */
+  private spawnSolverBody(
+    drop: ActiveDrop,
+    def: ToolDef,
+    built: BuiltTool,
+    x: number,
+    y: number,
+    z: number,
+    q: THREE.Quaternion,
+  ): void {
+    const body = new PickaxeBody(built.group, built.probes, this.tuning);
+    body.position.set(x, y, z);
+    body.orientation.copy(q).normalize();
+    body.velocity.set(rand(-0.6, 0.6), -2.5, rand(-0.6, 0.6));
+    body.gravityScale = def.gravityScale;
+    // per-tool character: bouncy tools bounce, dead ones thud
+    body.restitutionScale = clamp(def.restitution / 0.22, 0.5, 1.6);
+    body.linearDrag = def.linearDamping;
+    body.angularDrag = def.angularDamping;
+    body.userData.drop = drop;
+
+    // Random tumble: random axis, magnitude inside the configured range, scaled
+    // slightly by the tool so heavy hitters spin a touch slower.
+    const axis = new THREE.Vector3(rand(-1, 1), rand(-1, 1), rand(-1, 1));
+    if (axis.lengthSq() < 1e-4) axis.set(1, 0, 0);
+    axis.normalize();
+    const style = clamp(def.spin / 4.4, 0.7, 1.3);
+    const spin =
+      rand(this.tuning.initialSpinMin, this.tuning.initialSpinMax) *
+      (Math.random() < 0.5 ? 1 : -1) *
+      style;
+    body.angularVelocity.copy(axis).multiplyScalar(spin);
+
+    drop.sim = body;
+    this.sim.add(body);
+  }
+
+  /** Engine path, kept for the non-pickaxe tools that were tuned on it. */
+  private spawnEngineBody(
+    drop: ActiveDrop,
+    def: ToolDef,
+    built: BuiltTool,
+    x: number,
+    y: number,
+    z: number,
+    q: THREE.Quaternion,
+  ): void {
+    const physics = this.ctx.physics;
+    const mode = def.spinMode;
+    // 2D-in-3D rigid body: X/Y translation plus rotation about Z only. These
+    // are real Rapier degree-of-freedom constraints, so the solver itself can
+    // never accumulate depth velocity or off-plane spin.
+    const bodyDesc = physics.RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(x, y, z)
+      .setRotation({ x: q.x, y: q.y, z: q.z, w: q.w })
+      .setLinearDamping(def.linearDamping)
+      .setAngularDamping(def.angularDamping)
+      .setGravityScale(def.gravityScale)
+      .setCcdEnabled(def.ccd === true)
+      .enabledTranslations(true, true, false);
+    const body = physics.world.createRigidBody(bodyDesc);
+    if (mode === 'planar') {
+      body.setEnabledRotations(false, false, true, true);
+    } else if (mode === 'axial') {
+      body.setEnabledRotations(false, true, false, true);
+    }
+    drop.body = body;
+
+    const spin = def.spin * rand(0.75, 1.25) * (rand(0, 1) < 0.5 ? 1 : -1);
     if (mode === 'planar') {
       body.setAngvel({ x: 0, y: 0, z: spin }, true);
     } else if (mode === 'axial') {
@@ -276,9 +394,21 @@ export class DropSystem {
       );
     }
 
-    this.drops.push(drop);
-    this.ctx.audio.whoosh(def.kind === 'projectile' ? 1.4 : 1);
+    // Spawn velocity: a touch of horizontal drift for the pickaxes, downward
+    // always, and never any depth component.
+    const lateral = mode === 'planar' ? rand(-0.5, 0.5) : 0;
+    body.setLinvel({ x: lateral, y: -2.5, z: 0 }, true);
+
+    built.colliders.forEach((c, i) => {
+      const col = physics.world.createCollider(c, body);
+      physics.registerCollider(col.handle, {
+        kind: 'tool',
+        ref: drop,
+        part: built.parts[i] ?? 'head',
+      });
+    });
   }
+
 
   /* ------------------------------------------------------------- collision */
 
@@ -302,6 +432,78 @@ export class DropSystem {
     }
   }
 
+  /* ------------------------------------------------- hand-written solver --- */
+
+  /** Solver impact: juice, surface feedback and (for heads) mining. */
+  private onSimImpact(event: ImpactEvent): void {
+    const drop = event.body.userData.drop as ActiveDrop | undefined;
+    if (!drop || drop.state === 'done') return;
+    this.debugImpactText?.(event);
+
+    if (!event.destructible) {
+      if (event.normalSpeed > 2) this.impactOnGround(drop, event.point, event.normalSpeed);
+      return;
+    }
+
+    const target = this.ctx.getTarget();
+    const matIdx = target && event.voxelId !== undefined ? target.grid.mat[event.voxelId] : STONE_IDX;
+    const mat = MATERIALS[MATERIAL_IDS[matIdx]] ?? MATERIALS.stone;
+    if (event.normalSpeed < 1.2) return;
+    if (event.probeKind === 'handle') drop.handleHits++;
+
+    const power = clamp(event.normalSpeed / 26, 0.15, 1.3);
+    this.ctx.audio.impact(event.probeKind === 'handle' ? 'cloth' : mat.fx, power * 0.85);
+    this.ctx.fx.voxelBurst(event.point.x, event.point.y, event.point.z, matIdx, 0.5 + power * 0.5, 0.9);
+    this.ctx.camera.addShake(power * (event.probeKind === 'head' ? 0.3 : 0.12));
+  }
+
+  /**
+   * The solver has decided the struck block should break; the game owns the
+   * actual crater. Returning false vetoes the destruction, which makes the
+   * solver treat the block as solid (bounce or stick instead of penetrating).
+   */
+  private onSimVoxelDestroyed(event: ImpactEvent): boolean {
+    const drop = event.body.userData.drop as ActiveDrop | undefined;
+    if (!drop || drop.state !== 'falling') return false;
+    if (drop.mineCooldown > 0) return false;
+    const target = this.ctx.getTarget();
+    if (!target) return false;
+
+    const quality = QUALITY_MULT[event.quality] ?? 1;
+    const crit = event.quality === PERFECT;
+    const radius = this.radiusWorld(drop) * (crit ? 1.3 : 1);
+    const res = this.applyImpact(
+      drop,
+      event.voxelCenter ?? event.point,
+      radius,
+      drop.def.damage * quality,
+      crit,
+    );
+    if (!res || !res.destroyed.length) return false;
+
+    drop.mineCooldown = MINE_COOLDOWN;
+    drop.hasHit = true;
+    this.stats.targetHits++;
+    return true;
+  }
+
+  private onSimStick(body: PickaxeBody): void {
+    const drop = body.userData.drop as ActiveDrop | undefined;
+    if (!drop) return;
+    drop.stuck = true;
+    drop.restTimer = STICK_LINGER;
+    drop.impactPos.copy(body.position);
+    this.ctx.audio.impact('metal', 0.9);
+    this.ctx.fx.voxelBurst(body.position.x, body.position.y, body.position.z, STONE_IDX, 0.6, 0.8);
+    this.ctx.camera.addShake(0.14);
+  }
+
+  private onSimStop(body: PickaxeBody): void {
+    const drop = body.userData.drop as ActiveDrop | undefined;
+    if (!drop) return;
+    drop.restTimer = Math.max(drop.restTimer, STOP_LINGER);
+  }
+
   /**
    * Handle-first contact. No destruction and deliberately NO bounce impulse -
    * the tool just scrapes and keeps sliding on its own physics, though a small
@@ -310,9 +512,11 @@ export class DropSystem {
   private clang(drop: ActiveDrop): void {
     drop.handleHits++;
     if (drop.handleHits > 6) return;
-    const t = drop.body.translation();
-    const spin = drop.body.angvel();
-    drop.body.setAngvel(
+    const body = drop.body;
+    if (!body) return;
+    const t = body.translation();
+    const spin = body.angvel();
+    body.setAngvel(
       { x: spin.x, y: spin.y, z: spin.z + rand(-2.2, 2.2) },
       true,
     );
@@ -373,7 +577,7 @@ export class DropSystem {
     if (drop.def.behavior === 'roll') {
       // A rolling body bites sideways and keeps its footing underneath.
       const physR = (drop.def.bodyRadius ?? 1.6) * drop.def.scale;
-      const t = drop.body.translation();
+      const t = drop.body?.translation() ?? { x: 0, y: 0, z: 0 };
       TMP.set(t.x, t.y, t.z);
       const bite = target.damage(
         TMP,
@@ -412,10 +616,7 @@ export class DropSystem {
       return;
     }
 
-    const res = this.applyImpact(drop, drop.impactPos, radius, drop.def.damage * quality, false);
-    if (drop.def.kind === 'pickaxe' && res && res.destroyed.length > 0) {
-      this.hopUp(drop);
-    }
+    this.applyImpact(drop, drop.impactPos, radius, drop.def.damage * quality, false);
 
     if (drop.def.behavior === 'drill' || drop.def.behavior === 'saw') {
       drop.state = 'channel';
@@ -424,13 +625,13 @@ export class DropSystem {
     }
   }
 
-  impactOnGround(drop: ActiveDrop): void {
+  impactOnGround(drop: ActiveDrop, point?: THREE.Vector3, speedOverride?: number): void {
     if (drop.state === 'done') return;
     drop.groundHits++;
     this.stats.groundHits++;
     if (drop.groundHits > 2) return;
-    const speed = drop.prevVel.length();
-    const p = drop.tipWorld.y > -0.5 ? drop.tipWorld : drop.prevTipWorld;
+    const speed = speedOverride ?? drop.prevVel.length();
+    const p = point ?? (drop.tipWorld.y > -0.5 ? drop.tipWorld : drop.prevTipWorld);
     this.ctx.fx.voxelBurst(p.x, 0.25, p.z, STONE_IDX, 0.7, 0.7);
     this.ctx.fx.impact.dustRing(p.x, 0.1, p.z, 1.5, 0x8f8577, 0.7);
     this.ctx.audio.impact('stone', clamp(speed / 18, 0.25, 1.3));
@@ -440,10 +641,12 @@ export class DropSystem {
 
   private freeze(drop: ActiveDrop): void {
     drop.stuck = true;
+    const body = drop.body;
+    if (!body) return;
     try {
-      drop.body.setBodyType(this.ctx.physics.RAPIER.RigidBodyType.KinematicPositionBased, true);
-      drop.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-      drop.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+      body.setBodyType(this.ctx.physics.RAPIER.RigidBodyType.KinematicPositionBased, true);
+      body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      body.setAngvel({ x: 0, y: 0, z: 0 }, true);
     } catch {
       /* keep it dynamic if the API is unavailable */
     }
@@ -461,6 +664,9 @@ export class DropSystem {
     const prog = this.ctx.progression;
     const finalRadius = radius * (crit ? 1.4 : 1);
     const finalDamage = damage * prog.damageMul * (crit ? 2.1 : 1);
+    // Solver-driven pickaxes tumble in full 3D, so their craters are round;
+    // the planar engine tools keep the flattened bite they were tuned with.
+    const flatten = drop.sim || drop.def.spinMode === 'free' ? 1 : PLANE_FLATTEN;
     const res = target.damage(
       pos,
       finalRadius,
@@ -468,7 +674,7 @@ export class DropSystem {
       900,
       0,
       drop.def.maxBlocks,
-      drop.def.spinMode === 'free' ? 1 : PLANE_FLATTEN,
+      flatten,
     );
 
     let dominant = STONE_IDX;
@@ -485,9 +691,10 @@ export class DropSystem {
     const power = clamp(res.destroyed.length / 42, 0, 1.6);
 
     this.ctx.fx.impactBurst(pos.x, pos.y, pos.z, finalRadius, dominant, 0.6 + power);
-    const samples = Math.min(6, Math.floor(2 + res.destroyed.length * 0.12));
+    const samples = Math.min(6, res.destroyed.length);
     for (let i = 0; i < samples; i++) {
       const v = res.destroyed[(Math.random() * res.destroyed.length) | 0];
+      if (!v) continue;
       const wp = target.worldOf(v.cell, TMP);
       this.ctx.fx.voxelBurst(wp.x, wp.y, wp.z, v.mat, 0.7, 1.2);
     }
@@ -516,26 +723,14 @@ export class DropSystem {
   }
 
   /**
-   * A clean little hop after a pickaxe bites a block, so every successful hit
-   * reads as a bounce instead of the tool just stopping dead in the crater.
-   */
-  private hopUp(drop: ActiveDrop): void {
-    const v = drop.body.linvel();
-    // Guarantee a small upward pop without stacking on top of a hard
-    // restitution bounce (a heavy hit already rebounds on its own).
-    const hop = 4.2 + rand(0, 1.6);
-    drop.body.setLinvel({ x: v.x, y: Math.max(v.y, hop), z: 0 }, true);
-    const w = drop.body.angvel();
-    drop.body.setAngvel({ x: w.x, y: w.y, z: w.z + rand(-1.2, 1.2) }, true);
-  }
-
-  /**
    * A rolling body chews whatever it is pushing into. Voxels inside the
    * protected footprint below the sphere are skipped, so the boulder keeps
    * rolling on the strip it stands on instead of drilling downward.
    */
   private rollChew(drop: ActiveDrop, target: Target): void {
-    const t = drop.body.translation();
+    const rb = drop.body;
+    if (!rb) return;
+    const t = rb.translation();
     TMP.set(t.x, t.y, t.z);
     const physR = (drop.def.bodyRadius ?? 1.6) * drop.def.scale;
     const dps = drop.def.channelDps ?? 140;
@@ -593,6 +788,7 @@ export class DropSystem {
   /** Keeps a rolling body rolling: holds a target speed and rolls without slipping. */
   private keepRolling(drop: ActiveDrop): void {
     const body = drop.body;
+    if (!body) return;
     const v = body.linvel();
     const physR = (drop.def.bodyRadius ?? 1.6) * drop.def.scale;
     const targetSpeed = drop.def.rollSpeed ?? 8;
@@ -666,77 +862,104 @@ export class DropSystem {
       }
     }
 
+    // One fixed-timestep pass for every hand-simulated pickaxe. The solver owns
+    // those transforms; the loop below only reads gameplay state back out.
+    this.sim.update(dt);
+
     const target = this.ctx.getTarget();
     for (let i = this.drops.length - 1; i >= 0; i--) {
       const drop = this.drops[i];
-      const lv = drop.body.linvel();
-      drop.prevVel.set(lv.x, lv.y, lv.z);
-      drop.prevTipWorld.copy(drop.tipWorld);
 
-      const t = drop.body.translation();
-      const r = drop.body.rotation();
-      drop.built.group.position.set(t.x, t.y, t.z);
-      drop.built.group.quaternion.set(r.x, r.y, r.z, r.w);
-      drop.tipWorld.copy(drop.built.tip).applyQuaternion(drop.built.group.quaternion).add(drop.built.group.position);
-      drop.life += dt;
-      if (drop.mineCooldown > 0) drop.mineCooldown -= dt;
+      if (drop.sim) {
+        const body = drop.sim;
+        drop.prevVel.copy(body.velocity);
+        drop.prevTipWorld.copy(drop.tipWorld);
+        drop.built.group.position.copy(body.position);
+        drop.built.group.quaternion.copy(body.orientation);
+        drop.tipWorld
+          .copy(drop.built.tip)
+          .applyQuaternion(body.orientation)
+          .add(body.position);
+        drop.life += dt;
+        if (drop.mineCooldown > 0) drop.mineCooldown -= dt;
+        if (drop.restTimer > 0) {
+          drop.restTimer -= dt;
+          if (drop.restTimer <= 0 && drop.state === 'falling') drop.state = 'done';
+        } else if (drop.state === 'falling' && drop.life > 8) {
+          drop.state = 'done';
+        }
+      } else {
+        const rb = drop.body;
+        if (!rb) continue;
+        const lv = rb.linvel();
+        drop.prevVel.set(lv.x, lv.y, lv.z);
+        drop.prevTipWorld.copy(drop.tipWorld);
 
-      if (drop.state === 'channel') {
-        drop.channelLeft -= dt;
-        drop.channelTick -= dt;
-        if (drop.channelTick <= 0 && target) {
-          if (drop.def.behavior === 'roll') {
-            drop.channelTick = 0.075;
-            this.rollChew(drop, target);
-          } else {
-            drop.channelTick = 0.18;
-            const dps = drop.def.channelDps ?? 40;
-            const dmg = dps * 0.18 * this.ctx.progression.damageMul;
-            target.snapToBlock(drop.tipWorld, 3);
-            const radius = this.radiusWorld(drop, 0.7);
-            const res = target.damage(drop.tipWorld, radius, dmg, 260, 0, drop.def.maxBlocks);
-            if (res.destroyed.length) {
-              const mat = res.destroyed[0].mat;
-              this.ctx.fx.voxelBurst(drop.tipWorld.x, drop.tipWorld.y, drop.tipWorld.z, mat, 0.5, 0.8);
-              this.ctx.fx.puff(drop.tipWorld.x, drop.tipWorld.y, drop.tipWorld.z, mat, 5);
-              this.ctx.audio.impact('stone', 0.35);
-              this.ctx.debris.beginBudget(2);
-              this.ctx.onImpact({
-                position: drop.tipWorld.clone(),
-                voxels: res.destroyed.length,
-                coins: Math.round(res.coins * this.ctx.progression.coinMul * drop.def.coinBonus),
-                radius,
-                power: 0.25,
-                material: mat,
-                crit: false,
-                tool: drop.def,
-              });
+        const t = rb.translation();
+        const r = rb.rotation();
+        drop.built.group.position.set(t.x, t.y, t.z);
+        drop.built.group.quaternion.set(r.x, r.y, r.z, r.w);
+        drop.tipWorld.copy(drop.built.tip).applyQuaternion(drop.built.group.quaternion).add(drop.built.group.position);
+        drop.life += dt;
+        if (drop.mineCooldown > 0) drop.mineCooldown -= dt;
+
+        if (drop.state === 'channel') {
+          drop.channelLeft -= dt;
+          drop.channelTick -= dt;
+          if (drop.channelTick <= 0 && target) {
+            if (drop.def.behavior === 'roll') {
+              drop.channelTick = 0.075;
+              this.rollChew(drop, target);
             } else {
-              this.ctx.fx.sparks.emit({
-                x: drop.tipWorld.x,
-                y: drop.tipWorld.y,
-                z: drop.tipWorld.z,
-                count: 7,
-                dir: UP,
-                spread: 0.9,
-                speedMin: 3,
-                speedMax: 9,
-                sizeMin: 0.05,
-                sizeMax: 0.1,
-                lifeMin: 0.15,
-                lifeMax: 0.35,
-                gravity: -16,
-                drag: 1,
-                colors: [0xffd07a, 0xffffff],
-                alpha: 1,
-              });
-              if (drop.def.behavior === 'drill') this.ctx.audio.impact('metal', 0.2);
+              drop.channelTick = 0.18;
+              const dps = drop.def.channelDps ?? 40;
+              const dmg = dps * 0.18 * this.ctx.progression.damageMul;
+              target.snapToBlock(drop.tipWorld, 3);
+              const radius = this.radiusWorld(drop, 0.7);
+              const res = target.damage(drop.tipWorld, radius, dmg, 260, 0, drop.def.maxBlocks);
+              if (res.destroyed.length) {
+                const mat = res.destroyed[0].mat;
+                this.ctx.fx.voxelBurst(drop.tipWorld.x, drop.tipWorld.y, drop.tipWorld.z, mat, 0.5, 0.8);
+                this.ctx.fx.puff(drop.tipWorld.x, drop.tipWorld.y, drop.tipWorld.z, mat, 5);
+                this.ctx.audio.impact('stone', 0.35);
+                this.ctx.debris.beginBudget(2);
+                this.ctx.onImpact({
+                  position: drop.tipWorld.clone(),
+                  voxels: res.destroyed.length,
+                  coins: Math.round(res.coins * this.ctx.progression.coinMul * drop.def.coinBonus),
+                  radius,
+                  power: 0.25,
+                  material: mat,
+                  crit: false,
+                  tool: drop.def,
+                });
+              } else {
+                this.ctx.fx.sparks.emit({
+                  x: drop.tipWorld.x,
+                  y: drop.tipWorld.y,
+                  z: drop.tipWorld.z,
+                  count: 7,
+                  dir: UP,
+                  spread: 0.9,
+                  speedMin: 3,
+                  speedMax: 9,
+                  sizeMin: 0.05,
+                  sizeMax: 0.1,
+                  lifeMin: 0.15,
+                  lifeMax: 0.35,
+                  gravity: -16,
+                  drag: 1,
+                  colors: [0xffd07a, 0xffffff],
+                  alpha: 1,
+                });
+                if (drop.def.behavior === 'drill') this.ctx.audio.impact('metal', 0.2);
+              }
             }
           }
+          if (drop.channelLeft <= 0) drop.state = 'done';
+        } else if (drop.state === 'falling' && drop.life > 8) {
+          drop.state = 'done';
         }
-        if (drop.channelLeft <= 0) drop.state = 'done';
-      } else if (drop.state === 'falling' && drop.life > 8) {
-        drop.state = 'done';
       }
 
       if (drop.state === 'done') {
@@ -754,7 +977,8 @@ export class DropSystem {
 
   private removeDrop(index: number): void {
     const drop = this.drops[index];
-    this.ctx.physics.removeBody(drop.body);
+    if (drop.sim) this.sim.remove(drop.sim);
+    if (drop.body) this.ctx.physics.removeBody(drop.body);
     drop.built.group.removeFromParent();
     this.drops.splice(index, 1);
   }
@@ -763,16 +987,24 @@ export class DropSystem {
     return this.drops.length;
   }
 
+  /** the hand-written solver driving every pickaxe drop (dev/debug access) */
+  get simulator(): PickaxeSimulator {
+    return this.sim;
+  }
+
   /** Debug snapshot of live drops (dev harness only). */
   snapshot(): unknown {
     return this.drops.map((d) => {
-      const t = d.body.translation();
-      const v = d.body.linvel();
-      const w = d.body.angvel();
-      const r = d.body.rotation();
+      const sim = d.sim;
+      const rb = d.body;
+      const t = sim ? sim.position : rb!.translation();
+      const v = sim ? sim.velocity : rb!.linvel();
+      const w = sim ? sim.angularVelocity : rb!.angvel();
+      const r = sim ? sim.orientation : rb!.rotation();
       return {
         id: d.id,
         tool: d.def.id,
+        solver: sim ? 'custom' : 'rapier',
         state: d.state,
         stuck: d.stuck,
         hasHit: d.hasHit,
@@ -780,18 +1012,35 @@ export class DropSystem {
         groundHits: d.groundHits,
         rot: [Number(r.x.toFixed(3)), Number(r.y.toFixed(3)), Number(r.z.toFixed(3)), Number(r.w.toFixed(3))],
         angvel: [Number(w.x.toFixed(3)), Number(w.y.toFixed(3)), Number(w.z.toFixed(3))],
-        sleep: d.body.isSleeping(),
+        sleep: sim ? sim.sleeping : rb!.isSleeping(),
         x: Number(t.x.toFixed(3)),
         z: Number(t.z.toFixed(3)),
         y: Number(t.y.toFixed(2)),
         vy: Number(v.y.toFixed(2)),
         vx: Number(v.x.toFixed(3)),
         vz: Number(v.z.toFixed(3)),
-        com: [Number(d.body.localCom().x.toFixed(4)), Number(d.body.localCom().y.toFixed(4)), Number(d.body.localCom().z.toFixed(4))],
+        com: sim
+          ? [0, 0, 0]
+          : [
+              Number(rb!.localCom().x.toFixed(4)),
+              Number(rb!.localCom().y.toFixed(4)),
+              Number(rb!.localCom().z.toFixed(4)),
+            ],
         speed: Number(Math.hypot(v.x, v.y, v.z).toFixed(2)),
       };
     });
   }
+
+  /** Dev-only: spawn pickaxes ignoring cooldowns (physics lab / stress runs). */
+  debugDropMany(def: ToolDef, count: number, point: THREE.Vector3): void {
+    for (let i = 0; i < count; i++) {
+      const a = rand(0, Math.PI * 2);
+      const d = Math.sqrt(rand(0, 1)) * 3.4;
+      const height = point.y + def.spawnHeight * this.ctx.progression.heightMul;
+      this.spawnOne(def, point.x + Math.cos(a) * d, point.z + Math.sin(a) * d, height);
+    }
+  }
+
 
   createPreview(def: ToolDef): BuiltTool {
     return buildTool(def, this.ctx.physics.RAPIER);

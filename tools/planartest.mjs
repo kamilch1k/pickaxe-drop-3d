@@ -1,17 +1,23 @@
 /**
- * Planar-rigid-body verification for falling tools.
- * Checks the full 2.5D contract: X/Y free, Z locked, rotation about Z only.
+ * Solver contract test for the hand-written pickaxe simulation.
+ *
+ * The pickaxes used to be planar rigid bodies (X/Y translation, Z-only spin).
+ * They are now true 3D bodies driven by `PickaxeSimulator`, so this test checks
+ * the contract that replaced it:
+ *
+ *   - no NaN / Infinity anywhere in the state
+ *   - angular velocity stays inside the configured clamp
+ *   - the tool never sinks through the arena deck or the lab floor
+ *   - every dropped pickaxe eventually settles and falls asleep
+ *
  * Usage: node tools/planartest.mjs [url] [tool]
  */
 import puppeteer from 'puppeteer-core';
-import { mkdirSync } from 'node:fs';
 
 const URL = process.argv[2] ?? 'http://localhost:5177/';
 const TOOL = process.argv[3] ?? 'wooden';
-const OUT = 'shots';
 const CHROME =
   process.env.CHROME_PATH ?? 'C:/Program Files/Google/Chrome/Application/chrome.exe';
-mkdirSync(OUT, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const errors = [];
 
@@ -37,55 +43,43 @@ await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 90000 });
 await page.waitForSelector('#boot-start', { visible: true, timeout: 30000 });
 await page.click('#boot-start');
 await page.waitForFunction(() => !document.getElementById('boot'), { timeout: 30000 });
-await sleep(4000);
+await sleep(3000);
+await page.evaluate(() => window.__game.dev.grant(9_000_000));
 await page.evaluate(() => window.__game.dev.lowQuality());
-await page.evaluate((t) => {
-  if (t !== 'wooden') window.__game.dev.grant(9_000_000);
-  document.querySelector(`.tool-chip[data-id="${t}"]`)?.click();
-}, TOOL);
-await sleep(400);
+await page.evaluate(() => window.__game.dev.lab());
+await sleep(2600);
 
-const samples = [];
-let maxOffAxis = 0;
-let maxOffAxisVel = 0;
-let maxZdrift = 0;
-const drops = Number(process.argv[4] ?? 3);
-/** per-drop z baseline, keyed by the drop's stable id */
-const baselines = new Map();
+const COUNT = 12;
+await page.evaluate(([n, t]) => window.__game.dev.dropMany(n, t), [COUNT, TOOL]);
 
-for (let d = 0; d < drops; d++) {
-  const p = await page.evaluate(() => window.__game.dev.aimRandom());
-  if (!p) continue;
-  await page.mouse.move(Math.round(p.x), Math.round(p.y));
-  await page.mouse.click(Math.round(p.x), Math.round(p.y));
-  for (let i = 0; i < 10; i++) {
-    await sleep(200);
-    const info = await page.evaluate(() => {
-      const l = window.__game.dev.dropInfo();
-      if (!l || !l.length) return null;
-      // newest drop in flight
-      return l.reduce((a, b) => (b.id > a.id ? b : a), l[0]);
-    });
-    if (!info) continue;
-    if (!baselines.has(info.id)) baselines.set(info.id, info.z);
-    maxZdrift = Math.max(maxZdrift, Math.abs(info.z - baselines.get(info.id)));
-    if (Math.abs(info.vz) > 1e-9) maxOffAxisVel = Math.max(maxOffAxisVel, Math.abs(info.vz));
-    maxOffAxis = Math.max(maxOffAxis, Math.hypot(info.angvel[0], info.angvel[1]));
-    samples.push(info);
+let nan = false;
+let maxSpin = 0;
+let minY = Infinity;
+let maxSpeed = 0;
+const maxAngular = (await page.evaluate(() => window.__game.dev.tuning())).maxAngularVelocity;
+
+for (let i = 0; i < 40; i++) {
+  await sleep(250);
+  const info = await page.evaluate(() => window.__game.dev.simInfo());
+  for (const d of info.drops) {
+    if (![d.speed, d.spin, d.x, d.y, d.z].every(Number.isFinite)) nan = true;
+    maxSpin = Math.max(maxSpin, d.spin);
+    maxSpeed = Math.max(maxSpeed, d.speed);
+    minY = Math.min(minY, d.y);
   }
-  if (d === 0) await page.screenshot({ path: `${OUT}/planar-${TOOL}.png` });
-  await sleep(700);
+  if (i > 24 && info.drops.every((d) => d.sleeping || d.stuck)) break;
 }
 
-console.log(`tool: ${TOOL}   drops: ${drops}   samples: ${samples.length}   planes: ${baselines.size}`);
-console.log(`max Z drift (per drop) ....... ${maxZdrift.toExponential(2)}  (must be 0)`);
-console.log(`max |vz| ..................... ${maxOffAxisVel.toExponential(2)}  (must be 0)`);
-console.log(`max off-axis |angvel x,y| .... ${maxOffAxis.toExponential(2)}  (must be 0)`);
-const last = samples.at(-1);
-console.log(`last sample: y=${last.y} vz=${last.vz} av=${JSON.stringify(last.angvel)}`);
-const ok = maxZdrift < 1e-6 && maxOffAxisVel < 1e-9 && maxOffAxis < 1e-6;
-console.log(ok ? 'PASS: planar rigid body (X/Y free, Z locked, Z-rotation only)' : 'FAIL');
+const final = await page.evaluate(() => window.__game.dev.simInfo());
+const awake = final.drops.filter((d) => !d.sleeping && !d.stuck).length;
+
+console.log(`tool: ${TOOL}   dropped: ${COUNT}   probes/body: ${final.probesPerBody}`);
+console.log(`max speed: ${maxSpeed.toFixed(1)}   max spin: ${maxSpin.toFixed(2)} (clamp ${maxAngular})`);
+console.log(`lowest y reached: ${minY.toFixed(2)}   still awake at end: ${awake} / ${final.drops.length}`);
+const ok = !nan && maxSpin <= maxAngular + 1e-6 && maxSpeed <= 200 && minY > -3 && awake === 0;
+console.log(`NaN: ${nan}   spin within clamp: ${maxSpin <= maxAngular + 1e-6}   above deck: ${minY > -3}   all settled: ${awake === 0}`);
+console.log(ok ? 'PASS: 3D solver stays bounded and settles' : 'FAIL: solver contract violated');
 console.log(`errors (${errors.length})`);
 for (const e of errors.slice(0, 8)) console.log(e);
 await browser.close();
-process.exit(ok ? 0 : 1);
+process.exit(ok && errors.length === 0 ? 0 : 1);

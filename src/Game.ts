@@ -10,14 +10,16 @@ import type { DestroyedVoxel } from './destruction/VoxelGrid';
 import { Progression } from './progression/Progression';
 import { AudioSystem } from './audio/AudioSystem';
 import { Ui } from './ui/Ui';
-import { TOOLS, type ToolDef } from './content/tools';
-import { TARGETS } from './content/targets';
+import { TOOLS, TOOL_BY_ID, type ToolDef } from './content/tools';
+import { TARGETS, PHYSICS_LAB, type TargetSpec } from './content/targets';
 import { MATERIAL_IDS, MATERIALS } from './content/materials';
 import { BUILD_NUMBER } from './version';
 import { clamp, formatNumber } from './utils/math';
 import type { Owner, OwnerKind } from './physics/PhysicsWorld';
 import { Profiler } from './utils/Profiler';
 import { rand } from './utils/rng';
+import { PickaxeDebugView } from './physics/PickaxeDebugView';
+import type { PickaxeTuning } from './physics/PickaxeSimulator';
 
 const FIXED_DT = 1 / 60;
 const MAX_STEPS = 4;
@@ -59,6 +61,8 @@ export class Game {
   private slowmoTimer = 0;
   private slowmoScale = 0.3;
   private timeScale = 1;
+  /** dev-only overlay for the hand-written pickaxe solver */
+  private physDebug: PickaxeDebugView | null = null;
 
   private combo = 0;
   private comboTimer = 0;
@@ -102,6 +106,7 @@ export class Game {
       getTarget: () => this.target,
       onImpact: (report) => this.onImpact(report),
       onGroundHit: (def, speed, pos) => this.onGroundHit(def, speed, pos),
+      groundHalf: this.env.platformHalf,
     });
 
     this.rig.scene.add(this.aimGroup);
@@ -211,6 +216,49 @@ export class Game {
           const d = this.rig.director.camera.getWorldDirection(new THREE.Vector3());
           return { x: Number(d.x.toFixed(3)), y: Number(d.y.toFixed(3)), z: Number(d.z.toFixed(3)) };
         },
+        pickaxeDebug: (on: boolean) => this.setPickaxeDebug(on),
+        lab: () => {
+          this.loadTarget(0, true, PHYSICS_LAB);
+          return PHYSICS_LAB.id;
+        },
+        dropMany: (count = 12, toolId?: string) => {
+          const def = (toolId ? TOOL_BY_ID[toolId] : undefined) ?? this.prog.tool;
+          const point = this.hasAim ? this.aim : new THREE.Vector3(0, 0, 0);
+          this.drops.debugDropMany(def, clamp(Math.round(count), 1, 60), point);
+          return { tool: def.id, count };
+        },
+        tuning: (patch?: Partial<PickaxeTuning>) => {
+          if (patch) Object.assign(this.drops.tuning, patch);
+          return { ...this.drops.tuning };
+        },
+        simInfo: () => {
+          const bodies = this.drops.simulator.all;
+          return {
+            bodies: bodies.length,
+            probesPerBody: bodies.length ? bodies[0].probes.length : 0,
+            contacts: this.drops.simulator.debug.contacts,
+            contactKinds: this.drops.simulator.debug.contactKinds,
+            qualities: this.drops.simulator.debug.qualities,
+            probeKinds: this.drops.simulator.debug.probeKinds,
+            firstKinds: this.drops.simulator.debug.firstKinds,
+            firstQualities: this.drops.simulator.debug.firstQualities,
+            firstVoxelKinds: this.drops.simulator.debug.firstVoxelKinds,
+            firstVoxelQualities: this.drops.simulator.debug.firstVoxelQualities,
+            drops: bodies.map((b) => ({
+              speed: Number(b.velocity.length().toFixed(2)),
+              spin: Number(b.angularVelocity.length().toFixed(2)),
+              sleeping: b.sleeping,
+              stuck: b.stuck,
+              y: Number(b.position.y.toFixed(2)),
+              x: Number(b.position.x.toFixed(2)),
+              z: Number(b.position.z.toFixed(2)),
+              vy: Number(b.velocity.y.toFixed(2)),
+              vh: Number(Math.hypot(b.velocity.x, b.velocity.z).toFixed(2)),
+              contact: `${b.lastContact.probe}:${b.lastContact.destructible ? 'v' : 'g'}:${b.lastContact.normal.x.toFixed(0)},${b.lastContact.normal.y.toFixed(0)},${b.lastContact.normal.z.toFixed(0)}:${b.lastContact.normalSpeed.toFixed(2)}`,
+            })),
+          };
+        },
+        simReset: () => this.drops.simulator.debugReset(),
         colliderInfo: () => {
           const t = this.target;
           if (!t) return null;
@@ -284,6 +332,18 @@ export class Game {
     cameraInfo(): { x: number; y: number; z: number };
     enabledBodies(): number;
     colliderInfo(): unknown;
+    /** toggle the solver debug overlay (probes, sweeps, normals, vectors) */
+    pickaxeDebug(on: boolean): void;
+    /** load the physics lab: floor, single block, wall, pile */
+    lab(): string;
+    /** spawn N pickaxes at the current aim point, ignoring cooldowns */
+    dropMany(count?: number, toolId?: string): { tool: string; count: number };
+    /** read or patch the live solver tuning while the game runs */
+    tuning(patch?: Partial<PickaxeTuning>): PickaxeTuning;
+    /** solver body diagnostics */
+    simInfo(): unknown;
+    /** clear the solver's debug contact counters */
+    simReset(): void;
   } | null = null;
 
   get audioSystem(): AudioSystem {
@@ -499,16 +559,45 @@ export class Game {
     this.rig.setBloom(this.prog.settings.bloom);
   }
 
+  /**
+   * Dev-only solver overlay: geometry from the simulator plus a floating label
+   * with the classification of every impact, which is the fastest way to see
+   * whether the tuning produces the intended mix of head and handle hits.
+   */
+  private setPickaxeDebug(on: boolean): void {
+    if (!this.physDebug) {
+      this.physDebug = new PickaxeDebugView();
+      this.rig.scene.add(this.physDebug.group);
+    }
+    this.physDebug.setEnabled(this.drops.simulator, on);
+    this.drops.debugImpactText = on
+      ? (event) => {
+          if (event.normalSpeed < 4) return;
+          const label = event.quality
+            .replace('PERFECT_HEAD_HIT', 'PERFECT!')
+            .replace('_HIT', '')
+            .replace('GLANCING', 'GLANCE');
+          const p = this.debugLabelPos.copy(event.point);
+          p.y += 0.4 + Math.random() * 0.5;
+          this.ui.floats.text(p, label, { color: '#54e08a', size: 15, duration: 0.7 });
+        }
+      : null;
+    this.ui.hud.toast(on ? 'Physics debug ON' : 'Physics debug off', 'cyan');
+  }
+
+  private debugLabelPos = new THREE.Vector3();
+
+
   /* ---------------------------------------------------------------- target */
 
-  private loadTarget(index: number, animate = true): void {
+  private loadTarget(index: number, animate = true, specOverride?: TargetSpec): void {
     if (this.target) {
       this.target.dispose();
       this.target = null;
     }
     this.drops.clear();
     this.fx.clear();
-    const spec = TARGETS[clamp(index, 0, TARGETS.length - 1)];
+    const spec = specOverride ?? TARGETS[clamp(index, 0, TARGETS.length - 1)];
     this.debris.configure(spec.voxelSize);
 
     const target = new Target(spec, this.physics, this.hooks, 1000 + index * 977);
@@ -861,6 +950,7 @@ export class Game {
     this.env.update(raw, this.time);
     const p1 = prof.begin();
     this.drops.update(dt < 0.0005 ? 0 : dt);
+    if (this.physDebug?.visible) this.physDebug.update(this.drops.simulator);
     const p2 = prof.begin();
     prof.end('drops', p1);
 

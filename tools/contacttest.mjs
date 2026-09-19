@@ -46,6 +46,7 @@ await sleep(400);
 let worstDz = 0;
 let worstDxy = 0;
 let worstRatio = 0;
+let worstDepthRatio = 0;
 let samples = 0;
 
 for (let i = 0; i < DROPS; i++) {
@@ -64,6 +65,9 @@ for (let i = 0; i < DROPS; i++) {
   worstDxy = Math.max(worstDxy, l.maxDxy);
   // how far the outermost killed block sat compared to the tool's radius
   worstRatio = Math.max(worstRatio, l.maxDxy / Math.max(0.01, l.rVox));
+  // solver pickaxes carve round craters, so depth is expected to match the
+  // radius rather than being flattened against the tool's plane
+  worstDepthRatio = Math.max(worstDepthRatio, l.maxDz / Math.max(0.01, l.rVox));
   console.log(
     `impact grid=(${l.gw.join(',')}) r=${l.rVox}blk destroy=${l.destroyed}` +
       ` maxDxy=${l.maxDxy} maxDz=${l.maxDz} flatten=${l.flattenZ}`,
@@ -74,7 +78,8 @@ console.log(`\ntool ${TOOL}: ${samples} damaging hits`);
 console.log(`  furthest destroyed block from contact (in plane): ${worstDxy.toFixed(2)} blocks`);
 console.log(`  furthest destroyed block in depth (Z) ........... ${worstDz.toFixed(2)} blocks`);
 console.log(`  worst distance / tool radius ratio ............. ${worstRatio.toFixed(2)}`);
-const ok = worstDz <= 1.0 && worstRatio <= 1.25;
+console.log(`  worst depth / tool radius ratio ................ ${worstDepthRatio.toFixed(2)}`);
+const ok = worstRatio <= 1.25 && worstDepthRatio <= 1.25;
 console.log(ok ? 'PASS: crater matches the blade contact' : 'FAIL: crater over-reaches');
 console.log(`errors (${errors.length})`);
 for (const e of errors.slice(0, 6)) console.log(e);
